@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "id": "read_file",
+      "escribe": false,
+      "descripcion": "Lee un archivo del proyecto. Ruta relativa a la raíz.",
+      "argumentos": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "ruta relativa dentro del proyecto" },
+          "offset": { "type": "integer", "description": "línea donde empezar" },
+          "limit": { "type": "integer", "description": "cuántas líneas" }
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "id": "write_file",
+      "escribe": true,
+      "descripcion": "Crea o reemplaza un archivo del proyecto.",
+      "argumentos": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "content": { "type": "string" }
+        },
+        "required": ["path", "content"]
+      }
+    },
+    {
+      "id": "run_command",
+      "escribe": true,
+      "descripcion": "Corre un comando en la raíz del proyecto, con timeout.",
+      "argumentos": {
+        "type": "object",
+        "properties": {
+          "command": { "type": "string" },
+          "timeout": { "type": "integer" }
+        },
+        "required": ["command"]
+      }
+    },
+    {
+      "id": "list_dir",
+      "escribe": false,
+      "descripcion": "Lista una carpeta del proyecto.",
+      "argumentos": {
+        "type": "object",
+        "properties": { "path": { "type": "string" } },
+        "required": ["path"]
+      }
+    },
+    {
+      "id": "search_files",
+      "escribe": false,
+      "descripcion": "Busca texto en los archivos del proyecto.",
+      "argumentos": {
+        "type": "object",
+        "properties": {
+          "pattern": { "type": "string" },
+          "path": { "type": "string" }
+        },
+        "required": ["pattern"]
+      }
+    },
+    {
+      "id": "web_search",
+      "escribe": false,
+      "descripcion": "Búsqueda en la web. Solo si el producto la ofrece y la policy lo permite.",
+      "argumentos": {
+        "type": "object",
+        "properties": { "query": { "type": "string" } },
+        "required": ["query"]
+      }
+    },
+    {
+      "id": "git_status",
+      "escribe": false,
+      "descripcion": "Rama actual y estado del working tree.",
+      "argumentos": { "type": "object", "properties": {} }
+    },
+    {
+      "id": "git_diff",
+      "escribe": false,
+      "descripcion": "Diff sin commitear, opcionalmente acotado a una ruta.",
+      "argumentos": {
+        "type": "object",
+        "properties": { "path": { "type": "string" } }
+      }
+    },
+    {
+      "id": "git_log",
+      "escribe": false,
+      "descripcion": "Commits recientes.",
+      "argumentos": {
+        "type": "object",
+        "properties": { "limit": { "type": "integer" } }
+      }
+    },
+    {
+      "id": "git_commit",
+      "escribe": true,
+      "descripcion": "Stagea y commitea. Siempre pide aprobación.",
+      "argumentos": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" },
+          "paths": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["message"]
+      }
+    },
+    {
+      "id": "read_source",
+      "escribe": false,
+      "descripcion": "Lee un archivo de una carpeta de Fuentes (solo lectura).",
+      "argumentos": {
+        "type": "object",
+        "properties": { "path": { "type": "string" } },
+        "required": ["path"]
+      }
+    },
+    {
+      "id": "list_source",
+      "escribe": false,
+      "descripcion": "Lista el contenido de una carpeta de Fuentes.",
+      "argumentos": {
+        "type": "object",
+        "properties": { "path": { "type": "string" } }
+      }
+    },
+    {
+      "id": "generate_image",
+      "escribe": true,
+      "descripcion": "Crea una imagen con el motor que el usuario eligió.",
+      "argumentos": {
+        "type": "object",
+        "properties": {
+          "prompt": { "type": "string" },
+          "size": { "type": "string" }
+        },
+        "required": ["prompt"]
+      }
+    }
+  ]
+}

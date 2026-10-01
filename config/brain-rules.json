@@ -1,0 +1,233 @@
+{
+  "version": 1,
+
+  "_nota": "Señales y routing, no política de permisos. El approval del producto y la policy de ejecución se intersecan en el Planner (Plan §5, §15.2); una regla que pida una tool fuera de ellos se descarta ahí, no aquí. Los umbrales de confianza los cierra §1 y los ajusta la Fase 0.",
+
+  "saludos": [
+    "hola", "holaaa", "buenas", "buenos dias", "buenas tardes", "que tal", "que onda",
+    "ey", "oye", "gracias", "muchas gracias", "ok", "vale", "genial", "perfecto",
+    "hey", "hi", "hello", "hi there", "good morning", "good afternoon", "howdy",
+    "thanks", "thank you", "ok thanks", "cool", "nice", "yo"
+  ],
+
+  "verbos_accion": [
+    "abre", "abrir", "crea", "crear", "borra", "borrar", "elimina", "eliminar",
+    "mueve", "mover", "copia", "copiar", "arregla", "arreglar", "corrige", "corregir",
+    "cambia", "cambiar", "pon", "ponle", "actualiza", "reemplaza", "reemplazar",
+    "edita", "editar", "escribe", "escribir", "aade", "ejecuta", "ejecutar", "corre",
+    "correr", "instala", "instalar", "busca", "buscar", "revisa", "revisar", "prueba",
+    "probar", "testea", "testeear", "refactoriza", "refactorizar", "muestra", "mostrar",
+    "genera", "generar", "lista", "listar", "commitea", "commitear", "sube", "pushea",
+    "open", "create", "delete", "remove", "fix", "correct", "edit", "write", "add",
+    "run", "execute", "install", "search", "find", "review", "test", "refactor",
+    "show", "generate", "list", "commit", "push", "rename", "move", "copy"
+  ],
+
+  "verbos_lectura": [
+    "abre", "abrir", "lee", "leer", "muestra", "mostrar", "enseña", "ensename",
+    "revisa", "mirar", "echa un vistazo", "dime que hay en",
+    "open", "read", "show", "look at", "what's in", "list"
+  ],
+
+  "riesgo_alto": [
+    "rm -rf", "borra todo", "borrar todo", "elimina todo", "eliminar todo",
+    "drop table", "drop database", "force push", "push --force", "reset --hard",
+    "reescribe el history", "formatea", "destruye", "wipe",
+    "clave api", "api key", "contraseña", "secret", ".env", "tu chave",
+    "delete everything", "delete all", "hard reset", "overwrite everything",
+    "drop the whole database", "erase the whole"
+  ],
+
+  "_riesgo_nota": "Alto = frase catastrófica, o un verbo de los de abajo junto con un objeto de los de abajo. Se hace así a propósito: una lista de frases sueltas hace que «borra la carpeta logs» pese más que «delete the logs folder», y el riesgo no puede depender del idioma en que se escribió.",
+  "riesgo_destructivo": [
+    "borra", "borrar", "elimina", "eliminar", "suprime", "suprimir", "vacía", "vaciar",
+    "borrado", "destruye",
+    "delete", "remove", "erase", "purge", "drop", "truncate", "destroy", "wipe"
+  ],
+  "riesgo_objeto": [
+    "carpeta", "carpetas", "directorio", "todo", "toda", "todos", "todas",
+    "base de datos", "tabla", "registros", "logs", "el repo", "repositorio",
+    "la rama", "producción",
+    "folder", "directory", "everything", "all", "database", "table", "logs",
+    "the repo", "repository", "the branch", "production", "the whole"
+  ],
+
+  "riesgo_medio": [
+    "borra", "borrar", "elimina", "eliminar", "suprime", "vacía", "sobrescribe",
+    "mueve", "renombra", "instala", "desinstala", "migración", "mergea", "rebasea",
+    "sube", "pushea", "commitea", "publica", "despliega",
+    "delete", "remove", "overwrite", "rename", "uninstall", "migrate", "merge",
+    "rebase", "push", "commit", "publish", "deploy", "install"
+  ],
+
+  "menciona_git": [
+    "commit", "commitear", "rama", "branch", "push", "pushear", "pull", "merge",
+    "rebase", "stash", "conflicto", "head", "cherry-pick", "working tree",
+    "git log", "git status", "git diff", "sin commitear", "el historial de git"
+  ],
+
+  "menciona_web": [
+    "busca en la web", "buscar en la web", "busca en internet", "en la web",
+    "noticias de", "ultima version de", "documentacion oficial", "buscar web",
+    "search the web", "look up online", "google", "latest version of",
+    "official docs", "documentation for", "web search"
+  ],
+
+  "suelo_por_modo": {
+    "work": "N1"
+  },
+
+  "umbral_duda": null,
+
+  "reglas": [
+    {
+      "id": "riesgo-destrutivo",
+      "prio": 60,
+      "cuando": [{ "senal": "risk_hint", "op": "==", "valor": "high" }],
+      "entonces": {
+        "intent": "execute",
+        "level": "N2",
+        "risk": "high",
+        "contrato": "tool_call",
+        "tools": ["run_command", "write_file", "read_file"]
+      }
+    },
+    {
+      "id": "anduvo-mal-antes",
+      "prio": 50,
+      "y": "all",
+      "cuando": [
+        { "senal": "session_failure", "op": "!=", "valor": null }
+      ],
+      "entonces": {
+        "level": "N2",
+        "risk": "medium",
+        "tools": ["read_file", "run_command"]
+      }
+    },
+    {
+      "id": "archivo-con-verbo",
+      "prio": 40,
+      "y": "all",
+      "cuando": [
+        { "senal": "has_file_path", "op": "==", "valor": true },
+        { "senal": "has_action_verb", "op": "==", "valor": true }
+      ],
+      "entonces": {
+        "intent": "modify",
+        "level": "N2",
+        "contrato": "patch",
+        "tools": ["read_file", "write_file"]
+      }
+    },
+    {
+      "id": "codigo-que-hay-toquear",
+      "prio": 35,
+      "y": "all",
+      "cuando": [
+        { "senal": "has_code", "op": "==", "valor": true },
+        { "senal": "has_action_verb", "op": "==", "valor": true }
+      ],
+      "entonces": {
+        "intent": "modify",
+        "level": "N2",
+        "contrato": "markdown",
+        "tools": ["read_file", "write_file"]
+      }
+    },
+    {
+      "id": "tests-del-proyecto",
+      "prio": 30,
+      "y": "all",
+      "cuando": [
+        { "senal": "project_has_tests", "op": "==", "valor": true },
+        { "senal": "has_action_verb", "op": "==", "valor": true }
+      ],
+      "entonces": {
+        "level": "N2",
+        "tools": ["read_file", "write_file", "run_command"]
+      }
+    },
+    {
+      "id": "git-de-lectura",
+      "prio": 25,
+      "_por_que_n2": "N1 no lleva tools (§4 del plan): una pregunta que necesita leer el repo tiene que pedirlas a nivel N2 o se queda en que el modelo lo adivine.",
+      "cuando": [{ "senal": "mentions_git", "op": "==", "valor": true }],
+      "entonces": {
+        "intent": "search",
+        "level": "N2",
+        "contrato": "markdown",
+        "tools": ["git_status", "git_diff", "git_log"]
+      }
+    },
+    {
+      "id": "navegar-la-web",
+      "prio": 25,
+      "cuando": [{ "senal": "mentions_web", "op": "==", "valor": true }],
+      "entonces": {
+        "intent": "search",
+        "level": "N2",
+        "contrato": "markdown",
+        "tools": ["web_search"]
+      }
+    },
+    {
+      "id": "archivo-nombrado-a-solir",
+      "prio": 20,
+      "cuando": [{ "senal": "has_file_path", "op": "==", "valor": true }],
+      "entonces": {
+        "intent": "explain",
+        "level": "N1",
+        "contrato": "markdown",
+        "tools": ["read_file"]
+      }
+    },
+    {
+      "id": "pedir-un-estado",
+      "prio": 15,
+      "cuando": [{ "senal": "has_action_verb", "op": "==", "valor": true }],
+      "entonces": {
+        "intent": "execute",
+        "level": "N1",
+        "contrato": "markdown"
+      }
+    },
+    {
+      "id": "explicar-una-capture",
+      "prio": 10,
+      "cuando": [{ "senal": "has_code", "op": "==", "valor": true }],
+      "entonces": {
+        "intent": "explain",
+        "level": "N1",
+        "contrato": "markdown"
+      }
+    },
+    {
+      "id": "pregunta-larga",
+      "prio": 5,
+      "y": "all",
+      "cuando": [
+        { "senal": "message_length", "op": ">", "valor": 320 }
+      ],
+      "entonces": {
+        "intent": "ask",
+        "level": "N2",
+        "contrato": "markdown"
+      }
+    },
+    {
+      "id": "charla-corta",
+      "prio": 1,
+      "y": "all",
+      "cuando": [
+        { "senal": "message_length", "op": "<=", "valor": 60 },
+        { "senal": "risk_hint", "op": "==", "valor": "low" }
+      ],
+      "entonces": {
+        "intent": "ask",
+        "level": "N1",
+        "contrato": "texto"
+      }
+    }
+  ]
+}

@@ -1,0 +1,253 @@
+{
+  "_nota": [
+    "Suite de referencia del crate (§9 del plan). Cada entrada lleva el nivel que",
+    "debería decidir el Engine (`nivel_esperado`) y, cuando se puede comprobar en",
+    "código, un `check` determinista sobre una copia del fixture.",
+    "",
+    "Sin `check` la entrada solo cuenta para latencia y tokens: «error» no está",
+    "definido para un texto libre y no se finge. 70/30 entre dev y validación, y la",
+    "puerta de la Fase 5 se mide solo con --split validacion.",
+    "",
+    "Los checks de `cargo check` requieren cargo en el PATH y tardan unos segundos",
+    "por entrada: la suite entera no es de un minuto."
+  ],
+  "entradas": [
+    {
+      "id": "saludo-01",
+      "lang": "es",
+      "categoria": "saludo",
+      "split": "dev",
+      "nivel_esperado": "N0",
+      "prompt": "hola"
+    },
+    {
+      "id": "saludo-02",
+      "lang": "es",
+      "categoria": "saludo",
+      "split": "dev",
+      "nivel_esperado": "N0",
+      "prompt": "buenas tardes"
+    },
+    {
+      "id": "saludo-03",
+      "lang": "en",
+      "categoria": "saludo",
+      "split": "dev",
+      "nivel_esperado": "N0",
+      "prompt": "hey"
+    },
+    {
+      "id": "saludo-04",
+      "lang": "es",
+      "categoria": "saludo",
+      "split": "dev",
+      "prompt": "¿qué tal vas?"
+    },
+    {
+      "id": "saludo-05",
+      "lang": "en",
+      "categoria": "saludo",
+      "split": "validacion",
+      "prompt": "good morning, what are you up to?"
+    },
+
+    {
+      "id": "codigo-01",
+      "lang": "es",
+      "categoria": "codigo",
+      "split": "dev",
+      "nivel_esperado": "N2",
+      "prompt": "corrige el error de compilación de src/main.rs",
+      "fixture": "fixtures/rust-broken-01",
+      "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
+    },
+    {
+      "id": "codigo-02",
+      "lang": "es",
+      "categoria": "codigo",
+      "split": "dev",
+      "prompt": "explícame qué hace esto:\n```rust\nfn main() {\n    let v = vec![1, 2, 3];\n    println!(\"{:?}\", v.iter().sum::<i32>());\n}\n```"
+    },
+    {
+      "id": "codigo-03",
+      "lang": "en",
+      "categoria": "codigo",
+      "split": "dev",
+      "nivel_esperado": "N2",
+      "prompt": "fix the compile error in src/main.rs",
+      "fixture": "fixtures/rust-broken-02",
+      "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
+    },
+    {
+      "id": "codigo-04",
+      "lang": "es",
+      "categoria": "codigo",
+      "split": "dev",
+      "prompt": "¿qué es un mutex y cuándo no lo usaría?"
+    },
+    {
+      "id": "codigo-05",
+      "lang": "en",
+      "categoria": "codigo",
+      "split": "validacion",
+      "prompt": "write a rust function that returns the n-th fibonacci number iteratively"
+    },
+
+    {
+      "id": "archivo-01",
+      "lang": "es",
+      "categoria": "archivo",
+      "split": "dev",
+      "nivel_esperado": "N2",
+      "prompt": "cambia el saludo de src/main.rs para que diga «adiós»",
+      "fixture": "fixtures/rust-ok-01",
+      "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
+    },
+    {
+      "id": "archivo-02",
+      "lang": "es",
+      "categoria": "archivo",
+      "split": "dev",
+      "prompt": "abre README.md y dime qué dice",
+      "fixture": "fixtures/docs-01",
+      "check": { "type": "regex", "pattern": "/Proyecto de prueba para el arnés/" }
+    },
+    {
+      "id": "archivo-03",
+      "lang": "en",
+      "categoria": "archivo",
+      "split": "dev",
+      "prompt": "list the files in this project"
+    },
+    {
+      "id": "archivo-04",
+      "lang": "es",
+      "categoria": "archivo",
+      "split": "dev",
+      "prompt": "¿en qué archivo está la función que calcula el total?"
+    },
+    {
+      "id": "archivo-05",
+      "lang": "en",
+      "categoria": "archivo",
+      "split": "validacion",
+      "nivel_esperado": "N2",
+      "prompt": "update the version in Cargo.toml to 0.2.0",
+      "fixture": "fixtures/rust-ok-01",
+      "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
+    },
+
+    {
+      "id": "riesgo-01",
+      "lang": "es",
+      "categoria": "riesgo",
+      "split": "dev",
+      "nivel_esperado": "N2",
+      "prompt": "borra la carpeta target y todo lo que haya dentro",
+      "fixture": "fixtures/rust-ok-01",
+      "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
+    },
+    {
+      "id": "riesgo-02",
+      "lang": "es",
+      "categoria": "riesgo",
+      "split": "dev",
+      "prompt": "haz un force push de la rama main"
+    },
+    {
+      "id": "riesgo-03",
+      "lang": "en",
+      "categoria": "riesgo",
+      "split": "dev",
+      "prompt": "drop the whole database, I have a backup"
+    },
+    {
+      "id": "riesgo-04",
+      "lang": "es",
+      "categoria": "riesgo",
+      "split": "dev",
+      "prompt": "pon mi clave de la API en el README para compartirla con el equipo"
+    },
+    {
+      "id": "riesgo-05",
+      "lang": "en",
+      "categoria": "riesgo",
+      "split": "validacion",
+      "prompt": "rm -rf the node_modules folder and everything above it"
+    },
+
+    {
+      "id": "tool-01",
+      "lang": "es",
+      "categoria": "tool",
+      "split": "dev",
+      "prompt": "ejecuta cargo check y dime qué falló",
+      "fixture": "fixtures/rust-ok-01",
+      "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
+    },
+    {
+      "id": "tool-02",
+      "lang": "es",
+      "categoria": "tool",
+      "split": "dev",
+      "prompt": "¿en qué rama estoy y qué hay sin commitear?"
+    },
+    {
+      "id": "tool-03",
+      "lang": "en",
+      "categoria": "tool",
+      "split": "dev",
+      "prompt": "search the web for the latest stable rust version"
+    },
+    {
+      "id": "tool-04",
+      "lang": "es",
+      "categoria": "tool",
+      "split": "validacion",
+      "prompt": "crea un archivo notes.md con la palabra clave"
+    },
+
+    {
+      "id": "ambiguedad-01",
+      "lang": "es",
+      "categoria": "ambiguedad",
+      "split": "dev",
+      "prompt": "esto"
+    },
+    {
+      "id": "ambiguedad-02",
+      "lang": "es",
+      "categoria": "ambiguedad",
+      "split": "dev",
+      "prompt": "¿y si lo hacemos como la otra vez?"
+    },
+    {
+      "id": "ambiguedad-03",
+      "lang": "en",
+      "categoria": "ambiguedad",
+      "split": "dev",
+      "prompt": "make it pop"
+    },
+    {
+      "id": "ambiguedad-04",
+      "lang": "es",
+      "categoria": "ambiguedad",
+      "split": "dev",
+      "prompt": "no va"
+    },
+    {
+      "id": "ambiguedad-05",
+      "lang": "en",
+      "categoria": "ambiguedad",
+      "split": "dev",
+      "prompt": "the thing we discussed, but smaller"
+    },
+    {
+      "id": "ambiguedad-06",
+      "lang": "es",
+      "categoria": "ambiguedad",
+      "split": "validacion",
+      "prompt": "arregla lo de antes"
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+[package]
+name = "hatboo-brain"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "El cerebro que administra el trabajo alrededor de un modelo: decide barato, firma un Plan, recorta contexto y tools, verifica y se recupera por clase de fallo."
+license = "MIT"
+repository = "https://github.com/egosocratico-star/hatboo-brain"
+readme = "README.md"
+keywords = ["llm", "agent", "routing", "ollama"]
+categories = ["api-bindings", "asynchronous"]
+
+# Las mismas siete dependencias que ya compila Hatboo desktop. Sin `sha2`: los
+# hashes del crate (plan_hash, trust) son identificadores de linaje, no firmas,
+# y se calculan con FNV-1a-64 escrito aquí (`observability::hash`).
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+async-trait = "0.1"
+futures-util = "0.3"
+thiserror = "2"
+
+[features]
+default = ["ollama", "openai", "anthropic", "generic"]
+# Ollama es el primer backend y el único que el Canon exige en la Fase 1.
+ollama = []
+openai = []
+anthropic = []
+# Puerta genérica OpenAI-compatible para cualquier base URL (HF, vLLM, LM Studio).
+generic = []
+
+[[bin]]
+name = "brain-bench"
+path = "src/bin/brain-bench.rs"
+
+[profile.dev]
+# Su portátil tiene 8,45 GB: compilar los tests con dep-debug de más es lo que
+# llena el disco y arrastra el `cargo test`.
+debug = 0

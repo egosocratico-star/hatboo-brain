@@ -1,0 +1,12 @@
+/target
+Cargo.lock
+/models.json
+/models.sondeado.json
+/brain.log
+/brain.log.*
+benchmarks/resultados/
+
+# Los fixtures se comprueban con `cargo check`: eso deja carpeta target y un lock
+# dentro del fixture, y nada de eso viaja al repo.
+benchmarks/fixtures/**/target/
+benchmarks/fixtures/**/Cargo.lock
