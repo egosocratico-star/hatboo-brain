@@ -1,0 +1,48 @@
+name: CI
+
+# Windows por dos razones: es donde están medidas las 320 pruebas de este crate,
+# y es el único SO donde va a vivir (Hatboo desktop). En Linux iría más rápido,
+# pero hay lógica de rutas con separadores de Windows (`verification::patch`)
+# que nunca se ha corrido allí, y una CI que prueba un SO que no es el de
+# destino no está probando lo que parece.
+#
+# A propósito fuera: `cargo fmt --check`. El crate no ha pasado rustfmt nunca
+# (277 diffs hoy), y reformatear 84 ficheros no es el efecto secundario de un
+# commit de CI. Si algún día se pasa `cargo fmt`, ese paso entra.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  comprobar:
+    runs-on: windows-latest
+    # El runner de Windows va lento en el primer build sin caché; con 30 se queda
+    # corta la compilación, no las pruebas.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `-D warnings` es el punto: en este crate no hay ni un `#[allow]`, y sin
+      # el `-D` el primer lint silencioso volvería sin que nadie lo revise.
+      - name: Clippy (todos los targets, advertencias cortan)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Pruebas
+        run: cargo test --all-features --no-fail-fast
+
+      # INFORMATIVA, no es un umbral: `brain-bench --decisiones` imprime nivel
+      # y riesgo sobre la suite de 30 entradas pero sale con código 0 aunque
+      # baje la precisión. Solo el Engine: no llama a ningún modelo ni toca la
+      # RAM, por eso puede correr en un runner sin Ollama.
+      - name: Batería de decisiones (lectura, no umbral)
+        run: cargo run --bin brain-bench -- --decisiones --split todos
