@@ -164,6 +164,9 @@ pub struct ConfigMotor {
     /// Tope de la duda (§15.3, punto abierto; apagado hasta que se cierre).
     pub tope_de_duda: Option<Level>,
     pub cache: CacheDecisiones,
+    /// §II.10: «sin flag activo la pieza no corre». El Motor es el dueño del Fast
+    /// Path y de la caché de decisiones, así que los dos flags viven aquí.
+    pub flags: crate::config::schema::Flags,
 }
 
 pub struct Motor {
@@ -189,6 +192,11 @@ impl Motor {
         self
     }
 
+    pub fn con_flags(mut self, flags: crate::config::schema::Flags) -> Self {
+        self.config.flags = flags;
+        self
+    }
+
     /// El lote de un turno. Nunca falla: si no hay reglas, entra la heurística,
     /// y lo que no se puede resolver aquí lo resuelve el Planner con el plan
     /// seguro.
@@ -196,21 +204,27 @@ impl Motor {
         let herramientas: Vec<ToolId> = req.tools.ids();
 
         // 1 · Fast Path. Un `Some` salta el Engine y no se cachea: recalcularlo
-        // cuesta microsegundos.
-        if let Some(d) = self.reglas.fast_path(&req.message, &req.mode) {
-            return d.con_suelo_de_riesgo();
+        // cuesta microsegundos. Con el flag apagado (§II.10) la pieza no corre: el
+        // pedido sigue su camino por las reglas.
+        if self.config.flags.fast_path {
+            if let Some(d) = self.reglas.fast_path(&req.message, &req.mode) {
+                return d.con_suelo_de_riesgo();
+            }
         }
 
-        // 2 · Caché de decisiones.
+        // 2 · Caché de decisiones. Apagada el flag, se calcula cada turno: la
+        // decisión vuelve a salir de las reglas y el acierto se mide, no se repite.
         let clave = CacheDecisiones::clave(req);
-        if let Some(mut d) = self.config.cache.obtener(&clave) {
-            d.source = DecisionSource::Cache;
-            d.por_que.push_str(" · caché de decisiones");
-            // El modo puede haber cambiado de reglas: el suelo se reaplica.
-            if let Some(suelo) = self.reglas.suelo_por_modo.get(&req.mode) {
-                d.level = d.level.max(*suelo);
+        if self.config.flags.cache_decisiones {
+            if let Some(mut d) = self.config.cache.obtener(&clave) {
+                d.source = DecisionSource::Cache;
+                d.por_que.push_str(" · caché de decisiones");
+                // El modo puede haber cambiado de reglas: el suelo se reaplica.
+                if let Some(suelo) = self.reglas.suelo_por_modo.get(&req.mode) {
+                    d.level = d.level.max(*suelo);
+                }
+                return d.con_suelo_de_riesgo();
             }
-            return d.con_suelo_de_riesgo();
         }
 
         let s = senales(req, &self.reglas);
@@ -253,7 +267,9 @@ impl Motor {
         if dudoso && decision.confidence.valor() >= Confidence::UMBRAL_ALTO {
             decision.confidence = Confidence(0.5);
         }
-        self.config.cache.guardar(&clave, &decision);
+        if self.config.flags.cache_decisiones {
+            self.config.cache.guardar(&clave, &decision);
+        }
         decision
     }
 
@@ -416,6 +432,38 @@ mod tests {
         assert_eq!(segundo.source, DecisionSource::Cache);
         assert_eq!(primero.level, segundo.level);
         assert!(m.estadisticas_cache().0 > 0);
+    }
+
+    /// §II.10: «sin flag activo la pieza no corre». Un flag que no cambia la
+    /// conducta es decoración, así que cada uno se prueba por las dos partes.
+    #[test]
+    fn apagado_el_fast_path_el_pedido_sigue_por_las_reglas() {
+        let mut m = motor().con_flags(crate::config::schema::Flags {
+            fast_path: false,
+            ..Default::default()
+        });
+        let d = m.evaluar(&BrainRequest::nuevo("hatboo", Mode::CHAT, "hola"));
+        assert_ne!(d.source, DecisionSource::FastPath, "{:?}", d.source);
+        // Y la consecuencia de verdad: sin la pieza no hay carta fija, se paga el
+        // modelo. Esto es lo que el producto promete cuando apaga el atajo.
+        assert!(!d.skip_generative);
+        assert!(d.salida_directa.is_none());
+    }
+
+    #[test]
+    fn apagada_la_caché_cada_turno_vuelve_a_calcularse() {
+        let mut m = motor().con_flags(crate::config::schema::Flags {
+            cache_decisiones: false,
+            ..Default::default()
+        });
+        let req = BrainRequest::nuevo("hatboo", Mode::WORK, "arregla src/app.rs");
+        assert_eq!(m.evaluar(&req).source, DecisionSource::Reglas);
+        assert_eq!(
+            m.evaluar(&req).source,
+            DecisionSource::Reglas,
+            "la segunda pasada salió de la caché con la caché apagada"
+        );
+        assert_eq!(m.estadisticas_cache().0, 0, "ni siquiera se guardó");
     }
 
     #[test]

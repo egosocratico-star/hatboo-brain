@@ -127,6 +127,9 @@ impl OpcionesDeCorrida {
 pub struct Brain {
     motor: Mutex<Motor>,
     governor: Governor,
+    /// El config con el que se montó. Cambiar los `flags` aquí **no** reconfigura
+    /// al Motor ni al Escalador: esos los copian en `Brain::nuevo`. Para que un
+    /// flag obre, se pone en el `Montaje` antes de construir.
     pub config: BrainConfig,
     pub registry: Registry,
     proveedores: Vec<Arc<dyn ModelProvider>>,
@@ -146,13 +149,32 @@ impl Brain {
         if m.proveedores.is_empty() {
             return Err(BrainError::Config(crate::config::ConfigError::SinBackend));
         }
+        // Un flag sirve para apagar una pieza que existe (§II.10). `logprobs` y
+        // `backend_decision` son las Fases 6 y 7: aquí no hay nada que encender,
+        // y quedarse callado dejaría un config que se cree activo sin serlo.
+        let sin_pieza: Vec<&str> = [
+            m.config.flags.logprobs.then_some("logprobs (Fase 6)"),
+            m.config
+                .flags
+                .backend_decision
+                .then_some("backendDecision (Fase 7)"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !sin_pieza.is_empty() {
+            return Err(BrainError::Config(crate::config::ConfigError::Incoherente(
+                format!("{}: esa pieza todavía no está construida", sin_pieza.join(", ")),
+            )));
+        }
         let bitacora = Bitacora::nueva(m.config.bitacora.clone()).map_err(|e| {
             BrainError::Config(crate::config::ConfigError::Incoherente(format!(
                 "el log no se pudo abrir: {e}"
             )))
         })?;
-        let motor = Motor::nuevo(m.reglas)
+        let motor = Motor::nuevo(m.reglas.clone())
             .con_tope_de_duda(m.config.tope_de_duda)
+            .con_flags(m.config.flags.clone())
             .con_cache(crate::decision::cache::CacheDecisiones::nueva(
                 m.config.cache_max,
                 std::time::Duration::from_secs(m.config.cache_ttl_s),
@@ -270,7 +292,8 @@ impl Brain {
         // Los reintentos los fija el nivel, sin `max(1)`: un N0 que firma
         // «Instantáneo» y 0 reintentos no puede gastar una segunda generación
         // entera (y en CPU el segundo intento repaga el prefill completo).
-        let mut escalador = Escalador::nuevo(decision.level.reintentos());
+        let mut escalador = Escalador::nuevo(decision.level.reintentos())
+            .con_flags(&self.config.flags);
         let mut observaciones: Vec<String> = Vec::new();
         let mut reintentos: u8 = 0;
         let mut recargas: u32 = 0;
@@ -852,10 +875,22 @@ impl Brain {
 
     fn verificar_salida(&self, req: &BrainRequest, plan: &Plan, texto: &str) -> VerificationResult {
         let root = req.raiz().unwrap_or("");
-        let comando = req.project.as_ref().and_then(|p| p.verify.check.as_deref());
+        // §II.10: apagada `verificacion_ejecucion` el Brain no corre nada dentro
+        // del proyecto. Sin comando ni ejecutor el veredicto sale `Unverifiable`,
+        // que es la verdad —no un Pass regalado.
+        let ejecuta = self.config.flags.verificacion_ejecucion;
+        let comando = if ejecuta {
+            req.project.as_ref().and_then(|p| p.verify.check.as_deref())
+        } else {
+            None
+        };
         let e = EntornoV {
             comando,
-            ejecutor: self.ejecutor_comandos.as_ref().map(|x| x.as_ref()),
+            ejecutor: if ejecuta {
+                self.ejecutor_comandos.as_ref().map(|x| x.as_ref())
+            } else {
+                None
+            },
             leer: self.lector.as_ref().map(|x| x.as_ref()),
             esquema: None,
             idioma_pedido: if crate::decision::engine::idiomas(&req.message).0 == "en" {

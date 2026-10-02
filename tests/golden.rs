@@ -253,3 +253,43 @@ async fn la_traza_es_serializable_completa() {
     assert!(t.porque_este.contains("nano") || t.porque_este.contains("small") || !t.porque_este.is_empty());
     assert_eq!(t.senales.language, "es");
 }
+
+/// §II.10: un flag apaga una pieza que existe. `logprobs` y `backend_decision` son
+/// las Fases 6 y 7, que no están construidas: un config que las enciende se
+/// rechaza en vez de arrancar diciendo «los flags están puestos» sin que nada los
+/// lea.
+#[test]
+fn encender_una_fase_que_no_esta_construida_no_arranca_en_silencio() {
+    use hatboo_brain::config::schema::BrainConfig;
+    let cfg = Cargada::leer(Some(&Path::new(env!("CARGO_MANIFEST_DIR")).join("config"))).unwrap();
+    let mock = Arc::new(MockProvider::nuevo(modelos()).con_nombre("ollama"));
+    assert!(
+        !(BrainConfig::default().flags.logprobs || BrainConfig::default().flags.backend_decision),
+        "las Fases 6 y 7 nacen apagadas"
+    );
+    // El nombre que se comprueba es el que el producto escribe en el JSON
+    // (`camelCase`), no el del campo en Rust.
+    for (campo, fase) in [("logprobs", "Fase 6"), ("backendDecision", "Fase 7")] {
+        let mut config = BrainConfig::default();
+        match campo {
+            "logprobs" => config.flags.logprobs = true,
+            _ => config.flags.backend_decision = true,
+        }
+        let montaje = Montaje {
+            config,
+            proveedores: vec![mock.clone()],
+            registry: Registry::nuevo(modelos()),
+            reglas: cfg.reglas.clone(),
+            herramientas: cfg.herramientas.clone(),
+            sonda: Arc::new(SondaFija::default()),
+            ..Montaje::de_proveedor(mock.clone())
+        };
+        let s = match Brain::nuevo(montaje) {
+            Err(e) => e.mensaje(),
+            Ok(_) => panic!("un flag de una fase sin construir no puede montar un Brain"),
+        };
+        assert!(s.contains(campo), "{campo} no se nombró en el error: {s}");
+        assert!(s.contains(fase), "el error tiene que decir de qué fase es: {s}");
+        assert!(s.contains("no está construida"), "{s}");
+    }
+}

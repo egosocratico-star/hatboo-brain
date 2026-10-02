@@ -40,6 +40,12 @@ pub struct Escalador {
     vistas: std::collections::BTreeMap<FailureClass, u8>,
     /// La escalada de tier tiene su propio tope: dos saltos seguidos es un bucle.
     subidas: u8,
+    /// §II.10: «sin flag activo la pieza no corre». Apagada la recuperación,
+    /// ningún fallo vuelve al modelo; apagada la escalada, ninguna clase sube de
+    /// tier. Antes estos dos campos no existían y apagar las banderas no cambiaba
+    /// nada, o sea que la pieza no se podía apagar.
+    recuperacion: bool,
+    escalar: bool,
 }
 
 impl Escalador {
@@ -49,7 +55,15 @@ impl Escalador {
             usados: 0,
             vistas: Default::default(),
             subidas: 0,
+            recuperacion: true,
+            escalar: true,
         }
+    }
+
+    pub fn con_flags(mut self, f: &crate::config::schema::Flags) -> Self {
+        self.recuperacion = f.recuperacion;
+        self.escalar = f.escalar;
+        self
     }
 
     pub fn usados(&self) -> u8 {
@@ -65,8 +79,14 @@ impl Escalador {
     }
 
     /// Un reintento por clase, tope global `max_retries`, y §1 del plan: si la
-    /// misma clase vuelve a fallar, pasa a `model_capability`.
+    /// misma clase vuelve a fallar, pasa a `model_capability`. Con `recuperacion`
+    /// apagada toda clase aborta, y con `escalar` apagada no sube el tier.
     pub fn decidir(&mut self, clase: FailureClass) -> Accion {
+        if !self.recuperacion {
+            return Accion::Abortar {
+                porque: "la recuperación está apagada: el fallo se reporta sin reintentar".into(),
+            };
+        }
         *self.vistas.entry(clase).or_insert(0) += 1;
         let veces = self.cuenta(clase);
         let agotado = self.usados >= self.max_reintentos;
@@ -87,6 +107,13 @@ impl Escalador {
                 }
             }
             FailureClass::ModelCapability => {
+                if !self.escalar {
+                    // Sin escalada no hay remedio posible: esta clase *es* «el
+                    // modelo no llegó», y lo único que la cura es otro tier.
+                    return Accion::Abortar {
+                        porque: "la escalada está apagada: el Brain no cambia de tier".into(),
+                    };
+                }
                 if agotado || self.subidas >= 2 {
                     return Accion::Abortar {
                         porque: "no queda tier elegible para esta clase de fallo".into(),
@@ -111,7 +138,7 @@ impl Escalador {
                     };
                 }
                 self.usados += 1;
-                if veces >= 2 {
+                if veces >= 2 && self.escalar {
                     // Misma clase repetida → se trata como capacidad (§1†).
                     if self.subidas >= 2 {
                         return Accion::Abortar {
@@ -150,6 +177,7 @@ impl Escalador {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::schema::Flags;
     use FailureClass as F;
 
     #[test]
@@ -211,5 +239,56 @@ mod tests {
         assert!(matches!(e.decidir(F::ModelCapability), Accion::NuevoPlan { subir_tier: true, .. }));
         assert!(matches!(e.decidir(F::ModelCapability), Accion::NuevoPlan { subir_tier: true, .. }));
         assert!(matches!(e.decidir(F::ModelCapability), Accion::Abortar { .. }));
+    }
+
+    /// §II.10: un flag que no cambia la conducta no es un flag. Estas tres
+    /// pruebas son las que faltaban para que `recuperacion` y `escalar`
+    /// significaran algo.
+    #[test]
+    fn sin_recuperacion_nada_vuelve_al_modelo() {
+        let f = Flags {
+            recuperacion: false,
+            ..Default::default()
+        };
+        let mut e = Escalador::nuevo(3).con_flags(&f);
+        match e.decidir(F::Formato) {
+            Accion::Abortar { porque } => assert!(porque.contains("apagada"), "{porque}"),
+            a => panic!("{a:?}"),
+        }
+        assert_eq!(e.usados(), 0, "apagada la pieza no se gasta presupuesto");
+    }
+
+    #[test]
+    fn sin_escalada_no_sube_de_tier_pero_el_governor_rehace_config() {
+        let f = Flags {
+            escalar: false,
+            ..Default::default()
+        };
+        let mut e = Escalador::nuevo(9).con_flags(&f);
+        // `model_capability` es justo la clase que se cura subiendo tier.
+        match e.decidir(F::ModelCapability) {
+            Accion::Abortar { porque } => assert!(porque.contains("escalada"), "{porque}"),
+            a => panic!("{a:?}"),
+        }
+        // La clase repetida ya no salta: reintenta mientras quede presupuesto.
+        let mut e = Escalador::nuevo(9).con_flags(&f);
+        assert!(matches!(e.decidir(F::Formato), Accion::Reintentar { .. }));
+        assert!(matches!(e.decidir(F::Formato), Accion::Reintentar { .. }));
+        // Cambiar configuración no es escalar: eso sigue.
+        let mut e = Escalador::nuevo(9).con_flags(&f);
+        assert!(matches!(
+            e.decidir(F::Entorno),
+            Accion::NuevoPlan { subir_tier: false, .. }
+        ));
+    }
+
+    #[test]
+    fn los_flags_de_default_dejan_la_conducta_de_siempre() {
+        let mut e = Escalador::nuevo(2).con_flags(&Flags::default());
+        assert!(matches!(e.decidir(F::Formato), Accion::Reintentar { .. }));
+        assert!(matches!(
+            e.decidir(F::Formato),
+            Accion::NuevoPlan { subir_tier: true, .. }
+        ));
     }
 }

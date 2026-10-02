@@ -261,7 +261,7 @@ impl EjecutarTool for SinTools {
 }
 
 fn cerebro(mock: Arc<MockProvider>, cfg: &Cargada) -> Brain {
-    let montaje = Montaje {
+    let mut montaje = Montaje {
         proveedores: vec![mock.clone()],
         registry: Registry::nuevo(vec![modelo()]),
         reglas: cfg.reglas.clone(),
@@ -273,9 +273,11 @@ fn cerebro(mock: Arc<MockProvider>, cfg: &Cargada) -> Brain {
         lector: Some(Arc::new(|_: &str| None)),
         ..Montaje::de_proveedor(mock.clone())
     };
-    let mut brain = Brain::nuevo(montaje).unwrap();
-    brain.config.flags.verificacion_ejecucion = true;
-    brain
+    // El flag se pone en el montaje, no después: el Motor y el Escalador toman su
+    // copia en `Brain::nuevo`, así que mutar `brain.config` más tarde solo medio
+    // funcionaba.
+    montaje.config.flags.verificacion_ejecucion = true;
+    Brain::nuevo(montaje).unwrap()
 }
 
 fn pedido(mensaje: &str, modo: &str, verificar: Option<&str>) -> BrainRequest {
@@ -553,4 +555,87 @@ async fn el_resultado_de_la_tool_vuelve_al_modelo() {
         peticiones[1].prompt
     );
     assert!(!r.output.texto.is_empty(), "el turno terminó sin salida");
+}
+
+/// §II.10 probado con las dos mitades: encendida, la pieza corre y se le cobra el
+/// comando al ejecutor; apagada, no se ejecuta nada en el proyecto y el veredicto
+/// sigue diciendo la verdad. Hasta aquí `verificacion_ejecucion` no lo leía nadie,
+/// así que apagar la puerta de seguridad de la Fase 5 no apagaba nada.
+#[tokio::test]
+async fn el_flag_de_verificacion_ejecucion_cambia_de_verdad_la_conducta() {
+    #[derive(Default)]
+    struct CeroQueCuenta(AtomicUsize);
+    impl Ejecutor for CeroQueCuenta {
+        fn correr(&self, _: &str, _: &str, _: u32) -> Result<Salida, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Salida {
+                codigo: 0,
+                stdout: "Finished".into(),
+                stderr: String::new(),
+                dur_ms: 40,
+            })
+        }
+    }
+
+    let cfg = Cargada::leer(Some(&Path::new(env!("CARGO_MANIFEST_DIR")).join("config"))).unwrap();
+
+    async fn corrido(
+        cfg: &Cargada,
+        ejecuta: bool,
+    ) -> (usize, hatboo_brain::api::response::BrainResult) {
+        let mock = Arc::new(MockProvider::nuevo(vec![modelo()]).con_nombre("ollama"));
+        // Un `search` en N2 con contrato markdown: la forma no exige parche, así
+        // que lo único que puede impedir correr el comando es el flag.
+        for _ in 0..4 {
+            mock.responde_texto("En la rama hay dos archivos modificados sin commitear.");
+        }
+        let contador = Arc::new(CeroQueCuenta::default());
+        let mut montaje = Montaje {
+            proveedores: vec![mock.clone()],
+            registry: Registry::nuevo(vec![modelo()]),
+            reglas: cfg.reglas.clone(),
+            herramientas: cfg.herramientas.clone(),
+            sonda: Arc::new(SondaFija::default()),
+            contador: Arc::new(Estimador),
+            ejecutor_comandos: Some(contador.clone()),
+            lector: Some(Arc::new(|_: &str| None)),
+            ..Montaje::de_proveedor(mock.clone())
+        };
+        montaje.config.flags.verificacion_ejecucion = ejecuta;
+        let brain = Brain::nuevo(montaje).unwrap();
+        let r = brain
+            .run(&pedido(
+                "¿qué hay sin commitear en la rama?",
+                "work",
+                Some("cargo check"),
+            ))
+            .await
+            .unwrap();
+        (contador.0.load(Ordering::SeqCst), r)
+    }
+
+    let (con_flag, r_con) = corrido(&cfg, true).await;
+    assert!(
+        con_flag >= 1,
+        "encendida la pieza, el comando se corrió: {:?}",
+        r_con.verification
+    );
+    assert_eq!(r_con.verification, VerificationResult::Pass, "el 0 del comando, con la pieza encendida, es un Pass");
+    assert_eq!(r_con.output.status, OutputStatus::Verificado);
+
+    let (sin_flag, r_sin) = corrido(&cfg, false).await;
+    assert_eq!(
+        sin_flag, 0,
+        "apagada la pieza no se corre nada en el proyecto"
+    );
+    assert!(
+        matches!(
+            r_sin.verification,
+            VerificationResult::Unverifiable { .. }
+        ),
+        "sin la pieza el veredicto tiene que decirlo: {:?}",
+        r_sin.verification
+    );
+    assert_ne!(r_sin.output.status, OutputStatus::Verificado);
+    assert!(!r_sin.es_exito());
 }

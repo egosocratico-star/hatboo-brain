@@ -41,9 +41,10 @@ pub struct Flags {
     pub escalar: bool,
     /// Verificación determinista corriendo comandos del proyecto.
     pub verificacion_ejecucion: bool,
-    /// Logprobs (Fase 6). Off hasta calibrar.
+    /// Logprobs (Fase 6). Off hasta calibrar — y no se puede encender: `Brain::nuevo`
+    /// lo rechaza mientras la pieza no esté construida.
     pub logprobs: bool,
-    /// Backend de decisión tipo Laya (Fase 7). Off.
+    /// Backend de decisión tipo Laya (Fase 7). Igual que el anterior: sin pieza.
     pub backend_decision: bool,
 }
 
