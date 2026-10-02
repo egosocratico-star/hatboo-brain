@@ -5,7 +5,7 @@
 use hatboo_brain::api::request::{BrainRequest, ProjectContext, ToolInfo, VerifyCommands};
 use hatboo_brain::api::response::OutputStatus;
 use hatboo_brain::api::vocab::{
-    ApprovalLevel, ExecutionPolicy, Intent, Level, OutputContract, VerificationMode,
+    ApprovalLevel, ExecutionPolicy, Level, OutputContract, VerificationMode,
 };
 use hatboo_brain::brain::{Brain, EjecutarTool, Montaje};
 use hatboo_brain::config::loader::Cargada;
@@ -287,16 +287,23 @@ async fn sin_verificacion_posible_la_salida_es_ok_y_se_dice_sin_verificar() {
         .await
         .expect("hay salida que mostrar: run() no devuelve Err");
     assert!(!r.output.texto.is_empty());
-    assert!(
-        matches!(
-            r.verification,
-            VerificationResult::Unverifiable { .. } | VerificationResult::NoRequerida
-        ),
-        "{:?}",
-        r.verification
+    // Desde que las señales casan por palabra («pro**grama**» ya no es `rama`, y
+    // con eso se iba a N2 sin comando), esta explicación se queda en N1/Formato:
+    // la forma sí es comprobable, así que un Pass aquí es honesto. Lo que se
+    // exige es que el estado y el veredicto no se contradigan.
+    match r.verification {
+        VerificationResult::Pass => assert_eq!(r.output.status, OutputStatus::Verificado),
+        VerificationResult::Unverifiable { .. } => {
+            assert_eq!(r.output.status, OutputStatus::SinVerificar)
+        }
+        VerificationResult::NoRequerida => assert_eq!(r.output.status, OutputStatus::Propuesto),
+        VerificationResult::Fail { .. } => panic!("la forma de un texto no debería fallar: {:?}", r.verification),
+    }
+    assert_eq!(
+        r.es_exito(),
+        matches!(r.verification, VerificationResult::Pass),
+        "el éxito tiene que ser exactamente el Pass"
     );
-    assert_eq!(r.output.status, OutputStatus::SinVerificar, "{:?}", r.output);
-    assert!(!r.es_exito(), "Unverifiable no es éxito");
 }
 
 #[tokio::test]
@@ -356,9 +363,10 @@ async fn el_comando_de_verificacion_manda_sobre_lo_que_diga_el_modelo() {
 }
 
 #[tokio::test]
-async fn un_command_pass_si_es_exito() {
-    // Con un ejecutor que devuelve 0, el mismo pedido sale Verificado: el Pass no
-    // lo inventa el modelo.
+async fn el_comando_sobre_lo_no_parcheado_no_es_un_pass() {
+    // Antes este caso salía `Verificado` con solo devolver 0 el comando, y el
+    // comando había corrido sobre el archivo SIN parchear: decía «compilaba
+    // antes», no «tu parche compila». Ahora eso es `Unverifiable` declarado.
     struct Cero;
     impl Ejecutor for Cero {
         fn correr(&self, _: &str, _: &str, _: u32) -> Result<Salida, String> {
@@ -402,10 +410,32 @@ async fn un_command_pass_si_es_exito() {
         ))
         .await
         .unwrap();
-    assert_eq!(r.verification, VerificationResult::Pass, "{:?}", r.verification);
-    assert!(r.es_exito());
-    assert_eq!(r.output.status, OutputStatus::Verificado);
-    assert_eq!(r.plan.intent, Intent::Modify);
+    assert!(
+        matches!(r.verification, VerificationResult::Unverifiable { .. }),
+        "{:?}",
+        r.verification
+    );
+    assert!(!r.es_exito(), "sin el parche aplicado no puede ser éxito");
+    assert_ne!(r.output.status, OutputStatus::Verificado);
+    // Y el Pass sí llega cuando el producto declara que aplicó el parche antes
+    // de correr el comando: no era un capricho del verificador.
+    let e = Entorno {
+        comando: Some("cargo check"),
+        ejecutor: Some(&Cero),
+        parche_aplicado: true,
+        ..Default::default()
+    };
+    let c = Candidato {
+        texto: PARCHE_BIEN,
+        contrato: OutputContract::Patch,
+        root: Some("C:/p"),
+        archivo_objetivo: None,
+    };
+    assert_eq!(
+        verificar(hatboo_brain::api::vocab::VerificationMode::Determinista, &c, &e),
+        VerificationResult::Pass,
+        "con el parche aplicado, el 0 del comando sí es un Pass"
+    );
 }
 
 #[tokio::test]
@@ -426,4 +456,66 @@ async fn la_traza_de_un_turno_no_lleva_el_texto_del_usuario() {
     assert!(!j.contains("raton313"), "la traza no filtra el secreto: {j}");
     assert!(j.contains("riskHint") || j.contains("risk_hint"), "{j}");
     assert_eq!(t.senales.risk_hint, hatboo_brain::api::vocab::Risk::High);
+}
+
+/// Ejecuta de verdad, con una salida reconocible: es lo que tiene que volver al
+/// modelo en la ronda siguiente.
+struct LectorQueResponde;
+
+#[async_trait::async_trait]
+impl EjecutarTool for LectorQueResponde {
+    async fn ejecutar(&self, _: &String, _: &serde_json::Value) -> Result<String, String> {
+        Ok("CONTENIDO-LEIDO-42".into())
+    }
+}
+
+#[tokio::test]
+async fn el_resultado_de_la_tool_vuelve_al_modelo() {
+    // El bucle ejecutaba la tool, tiraba el resultado y pedía otra vez lo mismo:
+    // con temperature 0 salían ocho generaciones idénticas y un `Timeout`.
+    let cfg = Cargada::leer(Some(&Path::new(env!("CARGO_MANIFEST_DIR")).join("config"))).unwrap();
+    let mock = Arc::new(MockProvider::nuevo(vec![modelo()]).con_nombre("ollama"));
+    mock.responde(GenerationResult {
+        tool_calls: vec![hatboo_brain::providers::LlamadaTool {
+            tool: "read_file".into(),
+            args: serde_json::json!({ "path": "src/main.rs" }),
+        }],
+        ..Default::default()
+    });
+    // Suficientes por si la verificación pide su reintento: aquí se comprueba la
+    // segunda petición, no cómo termina la corrida.
+    for _ in 0..3 {
+        mock.responde_texto("ya lo leí");
+    }
+    let montaje = Montaje {
+        proveedores: vec![mock.clone()],
+        registry: Registry::nuevo(vec![modelo()]),
+        reglas: cfg.reglas.clone(),
+        herramientas: cfg.herramientas.clone(),
+        sonda: Arc::new(SondaFija::default()),
+        contador: Arc::new(Estimador),
+        ejecutor_tools: Some(Arc::new(LectorQueResponde)),
+        ..Montaje::de_proveedor(mock.clone())
+    };
+    let brain = Brain::nuevo(montaje).unwrap();
+    let r = brain
+        .run(&pedido(
+            "Corrige el error de compilación de src/main.rs",
+            "work",
+            None,
+        ))
+        .await
+        .unwrap();
+    let peticiones = mock.peticiones();
+    assert!(
+        peticiones.len() >= 2,
+        "no hubo una segunda vuelta con el resultado: {}",
+        peticiones.len()
+    );
+    assert!(
+        peticiones[1].prompt.contains("CONTENIDO-LEIDO-42"),
+        "la tool se ejecutó pero su resultado no volvió al modelo: {:?}",
+        peticiones[1].prompt
+    );
+    assert!(!r.output.texto.is_empty(), "el turno terminó sin salida");
 }

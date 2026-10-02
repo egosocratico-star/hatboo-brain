@@ -2,7 +2,7 @@
 //! salida.
 
 use super::execution::Ejecutor;
-use super::{Candidato, Fallo, Unverifiable, Verdict, VerificationResult, json, patch, text};
+use super::{Candidato, Fallo, Lector, Unverifiable, Verdict, VerificationResult, json, patch, text};
 use crate::api::vocab::{FailureClass, OutputContract, VerificationMode};
 
 /// Lo que el verificatorio necesita del entorno. Todo lo que falte se declara
@@ -14,10 +14,15 @@ pub struct Entorno<'a> {
     pub ejecutor: Option<&'a dyn Ejecutor>,
     /// Para leer el archivo que el parche quiere tocar. `Send + Sync` porque el
     /// runtime lo tiene detrás de un `Arc`.
-    pub leer: Option<&'a (dyn Fn(&str) -> Option<String> + Send + Sync)>,
+    pub leer: Option<&'a Lector>,
     pub esquema: Option<&'a serde_json::Value>,
     pub idioma_pedido: Option<&'a str>,
     pub timeout_s: u32,
+    /// Si el producto **ya aplicó** el parche que se está verificando sobre la
+    /// raíz donde corre el comando. Con `false`, un `Pass` del comando dice que
+    /// el proyecto compilaba antes del parche, no después: eso no es verificar
+    /// el parche y no se vende como tal.
+    pub parche_aplicado: bool,
 }
 
 impl<'a> Default for Entorno<'a> {
@@ -29,6 +34,7 @@ impl<'a> Default for Entorno<'a> {
             esquema: None,
             idioma_pedido: None,
             timeout_s: 60,
+            parche_aplicado: false,
         }
     }
 }
@@ -79,6 +85,18 @@ fn determinista(c: &Candidato, e: &Entorno) -> Verdict {
             },
         };
     };
+    // Con contrato `patch`, correr el comando sobre los archivos tal cual están
+    // no dice nada del parche: a lo sumo confirma que compilaba antes. Se dice
+    // como lo que es, y el Pass llega cuando el producto aplique el parche en una
+    // copia y la señale con `parche_aplicado`.
+    if c.contrato == OutputContract::Patch && !e.parche_aplicado {
+        return Verdict::Unverifiable {
+            motivo: Unverifiable::ComandoNoEjecutable(format!(
+                "el comando «{comando}» corrió sobre los archivos sin parchear: \
+                 lo que comprueba es el estado anterior, no tu parche"
+            )),
+        };
+    }
     super::execution::comprobar(ejecutor, comando, c.root.unwrap_or("."), e.timeout_s)
 }
 

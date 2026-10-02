@@ -10,6 +10,11 @@ pub mod text;
 use crate::api::vocab::{FailureClass, OutputContract};
 use serde::{Deserialize, Serialize};
 
+/// Lo que pone el producto para leer un archivo del proyecto: ruta → contenido.
+/// Es una sola definición porque la piden los dos lados: `Entorno.leer` la usa
+/// prestada y el `Montaje` del runtime la guarda en un `Arc` (de ahí `Send + Sync`).
+pub type Lector = dyn Fn(&str) -> Option<String> + Send + Sync;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {

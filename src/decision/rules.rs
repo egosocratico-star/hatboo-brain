@@ -119,6 +119,17 @@ pub struct Reglas {
     pub menciona_git: Vec<String>,
     #[serde(default)]
     pub menciona_web: Vec<String>,
+    /// Nombres de cosas que están **dentro del proyecto** («archivo», «files»,
+    /// «carpeta»). Es lo que separa «¿en qué archivo está el total?» de una charla:
+    /// sin esta señal ninguna regla podía ofrecer `list_dir` ni `search_files`.
+    /// A propósito no incluye «función» ni «code»: «write a rust function» pide
+    /// código en la respuesta, no buscar en el disco.
+    #[serde(default)]
+    pub menciona_archivos: Vec<String>,
+    /// Lo que se dice cuando hay que **correr** algo. Igual que arriba: sin señal
+    /// no había regla que llegara a `run_command`, y un N1 no puede llevar tools.
+    #[serde(default)]
+    pub menciona_comando: Vec<String>,
     /// Suelo de nivel por modo. Un `work` no puede caer a N0 con una tool de más.
     #[serde(default)]
     pub suelo_por_modo: std::collections::BTreeMap<String, Level>,
@@ -140,6 +151,8 @@ impl Default for Reglas {
             riesgo_objeto: Vec::new(),
             menciona_git: Vec::new(),
             menciona_web: Vec::new(),
+            menciona_archivos: Vec::new(),
+            menciona_comando: Vec::new(),
             suelo_por_modo: Default::default(),
             umbral_duda: None,
         }

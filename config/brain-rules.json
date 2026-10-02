@@ -14,13 +14,16 @@
     "abre", "abrir", "crea", "crear", "borra", "borrar", "elimina", "eliminar",
     "mueve", "mover", "copia", "copiar", "arregla", "arreglar", "corrige", "corregir",
     "cambia", "cambiar", "pon", "ponle", "actualiza", "reemplaza", "reemplazar",
-    "edita", "editar", "escribe", "escribir", "aade", "ejecuta", "ejecutar", "corre",
+    "edita", "editar", "escribe", "escribir", "añade", "agrega", "agregar",
+    "ejecuta", "ejecutar", "corre",
     "correr", "instala", "instalar", "busca", "buscar", "revisa", "revisar", "prueba",
     "probar", "testea", "testeear", "refactoriza", "refactorizar", "muestra", "mostrar",
     "genera", "generar", "lista", "listar", "commitea", "commitear", "sube", "pushea",
     "open", "create", "delete", "remove", "fix", "correct", "edit", "write", "add",
     "run", "execute", "install", "search", "find", "review", "test", "refactor",
-    "show", "generate", "list", "commit", "push", "rename", "move", "copy"
+    "show", "generate", "list", "commit", "push", "rename", "move", "copy",
+    "update", "set", "change", "modify", "bump", "replace", "make", "insert",
+    "append", "configure", "upgrade", "downgrade"
   ],
 
   "verbos_lectura": [
@@ -33,7 +36,10 @@
     "rm -rf", "borra todo", "borrar todo", "elimina todo", "eliminar todo",
     "drop table", "drop database", "force push", "push --force", "reset --hard",
     "reescribe el history", "formatea", "destruye", "wipe",
-    "clave api", "api key", "contraseña", "secret", ".env", "tu chave",
+    "clave api", "clave de la api", "clave de api", "mi clave", "las claves",
+    "api key", "api keys", "secret key", "access token", "auth token",
+    "token de acceso", "contraseña", "password", "secreto", "secret",
+    "credencial", "credenciales", "credential", "credentials", ".env", "tu chave",
     "delete everything", "delete all", "hard reset", "overwrite everything",
     "drop the whole database", "erase the whole"
   ],
@@ -71,6 +77,21 @@
     "noticias de", "ultima version de", "documentacion oficial", "buscar web",
     "search the web", "look up online", "google", "latest version of",
     "official docs", "documentation for", "web search"
+  ],
+
+  "_archivos_nota": "Cosas que están en el disco, no en la respuesta. «función» y «function» a propósito fuera: «write a rust function» pide código escrito en el texto, y eso no se busca en el proyecto.",
+  "menciona_archivos": [
+    "archivo", "archivos", "fichero", "ficheros", "carpeta", "carpetas",
+    "directorio", "directorios", "proyecto", "repositorio",
+    "file", "files", "folder", "folders", "directory", "directories", "project",
+    "repository"
+  ],
+
+  "_comando_nota": "Lo que se dice cuando hay que correr algo. Sin esta señal ninguna regla llegaba a `run_command`, y un `has_action_verb` en N1 no puede llevar tools (§4): «ejecuta cargo check» se quedaba en que el modelo lo adivinara.",
+  "menciona_comando": [
+    "ejecuta", "ejecutar", "corre", "correr", "compila", "compilar", "comando",
+    "run", "execute", "compile", "build", "command",
+    "cargo", "npm", "npx", "pnpm", "yarn", "pytest", "docker", "bash", "powershell"
   ],
 
   "suelo_por_modo": {
@@ -172,6 +193,30 @@
       }
     },
     {
+      "id": "ejecutar-algo",
+      "prio": 23,
+      "_por_que_n2": "«ejecuta cargo check» no se puede contestar sin `run_command`, y un N1 no lleva tools. Sin esta regla la petición caía en `pedir-un-estado` (N1) y el modelo tenía que adivinar la salida del comando.",
+      "cuando": [{ "senal": "mentions_command", "op": "==", "valor": true }],
+      "entonces": {
+        "intent": "execute",
+        "level": "N2",
+        "contrato": "markdown",
+        "tools": ["run_command", "read_file"]
+      }
+    },
+    {
+      "id": "mirar-dentro-del-proyecto",
+      "prio": 22,
+      "_por_que_n2": "Lo mismo con el disco: «¿en qué archivo está…?» y «lista los archivos» necesitan `search_files` / `list_dir`. Antes de esta señal esas dos tools no las ofrecía ninguna regla, así que estaban muertas.",
+      "cuando": [{ "senal": "mentions_project_files", "op": "==", "valor": true }],
+      "entonces": {
+        "intent": "search",
+        "level": "N2",
+        "contrato": "markdown",
+        "tools": ["list_dir", "search_files", "read_file"]
+      }
+    },
+    {
       "id": "archivo-nombrado-a-solir",
       "prio": 20,
       "cuando": [{ "senal": "has_file_path", "op": "==", "valor": true }],
@@ -218,6 +263,7 @@
     {
       "id": "charla-corta",
       "prio": 1,
+      "_por_que_n0": "Gana solo cuando no habló ninguna de las de arriba: sin ruta, sin código, sin verbo de acción, sin git ni web y sin riesgo. Eso es charla, y la charla no necesita plan ni verificación. En modo `work` el suelo de abajo la sube a N1 otra vez.",
       "y": "all",
       "cuando": [
         { "senal": "message_length", "op": "<=", "valor": 60 },
@@ -225,7 +271,7 @@
       ],
       "entonces": {
         "intent": "ask",
-        "level": "N1",
+        "level": "N0",
         "contrato": "texto"
       }
     }

@@ -103,6 +103,15 @@ impl Governor {
         let presion = self.bajo_presion(sonda);
 
         let minimo = nivel.num_ctx_minimo();
+        // El margen de §11 son 1500 MB, pero en una máquina de 8,45 GB eso hace
+        // que NUNCA quepa un modelo local: con 1,6 GB libres y un modelo de 878,
+        // pedir 2378 es rechazarlo siempre. Donde se conoce el total, el margen
+        // se estrecha a la octava parte (1056 MB aquí) y se sigue dejando constar
+        // en el aviso; sin ese dato, manda el de la spec.
+        let margen = match sonda.total_mb() {
+            Some(t) if t > 0 => self.config.margen_mb.min(t / 8),
+            _ => self.config.margen_mb,
+        };
         let escalera: Vec<u32> = self
             .config
             .ctx_permitidos
@@ -144,7 +153,10 @@ impl Governor {
                 // Sin dato de RAM no se afirma que quepa. El Selector lo tratará
                 // como «no elegible ahora» y lo dirá con cifras.
                 None => false,
-                Some(l) => ram + self.config.margen_mb <= l,
+                // Si ya está residente a este `num_ctx` no sale RAM nueva: exigir
+                // el margen otra vez hacía rechazar el modelo que tenía delante,
+                // y expulsarlo y recargarlo cuesta 7,3 s medidos.
+                Some(l) => ram + margen <= l || residente_actual == Some(ctx),
             };
             if cabe {
                 let residente = residente_actual == Some(ctx);
@@ -168,13 +180,13 @@ impl Governor {
                             "«{}» cabe a {ctx} ({} MB + {} de margen); cambia de ctx: +{ms} ms de recarga",
                             modelo.id,
                             ram,
-                            self.config.margen_mb
+                            margen
                         ),
                         _ => format!(
                             "«{}» cabe a {ctx}: {} MB + {} MB de margen sobre {} MB libres",
                             modelo.id,
                             ram,
-                            self.config.margen_mb,
+                            margen,
                             libre.unwrap_or(0)
                         ),
                     },

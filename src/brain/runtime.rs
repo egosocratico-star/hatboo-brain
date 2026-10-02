@@ -7,7 +7,9 @@ use crate::api::request::{BrainRequest, TrustState};
 use crate::api::response::{
     BrainResult, DecisionTrace, Output, OutputStatus, TaskMetrics, ToolCall,
 };
-use crate::api::vocab::{ApprovalLevel, FailureClass, ToolId};
+use crate::api::vocab::{
+    ApprovalLevel, ExecutionTarget, FailureClass, ThinkingLevel, ToolId,
+};
 use crate::config::schema::BrainConfig;
 use crate::context::{self, Prioridad};
 use crate::decision::engine::Motor;
@@ -25,7 +27,7 @@ use crate::providers::{
 use crate::recovery::{classifier, escalator::Accion, Escalador};
 use crate::resources::{Governor, ResourceProbe};
 use crate::tools::{Deciso, Herramientas, Puerta};
-use crate::verification::{self, Candidato, Entorno as EntornoV, VerificationResult};
+use crate::verification::{self, Candidato, Entorno as EntornoV, Lector, VerificationResult};
 use crate::brain::state::EstadoTarea;
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -63,7 +65,7 @@ pub struct Montaje {
     pub identidad: Identidad,
     pub ejecutor_tools: Option<Arc<dyn EjecutarTool>>,
     pub ejecutor_comandos: Option<Arc<dyn crate::verification::execution::Ejecutor>>,
-    pub lector: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
+    pub lector: Option<Arc<Lector>>,
     /// El sí explícito del usuario a que este pedido salga del equipo. Sin él,
     /// ninguna policy manda nada a una API (§15.2 del plan).
     pub consentimiento_api: bool,
@@ -125,7 +127,7 @@ pub struct Brain {
     herramientas: Herramientas,
     ejecutor_tools: Option<Arc<dyn EjecutarTool>>,
     ejecutor_comandos: Option<Arc<dyn crate::verification::execution::Ejecutor>>,
-    lector: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
+    lector: Option<Arc<Lector>>,
     bitacora: Mutex<Bitacora>,
     consentimiento_api: bool,
 }
@@ -246,8 +248,14 @@ impl Brain {
         let inicio = std::time::Instant::now();
         let mut decision = self.decidir(req);
 
-        if decision.skip_generative {
-            return self.sin_generativo(req, &decision, inicio, &opts);
+        // `skip_generative` es una promesa: el que la pone trae la respuesta
+        // calculada (`salida_directa`) o el archivo que hay que leer
+        // (`lectura_directa`). Si no trae nada de los dos, la salida sale vacía,
+        // así que la promesa se comprueba aquí y se cae al modelo.
+        if decision.skip_generative
+            && (decision.salida_directa.is_some() || decision.lectura_directa.is_some())
+        {
+            return self.sin_generativo(&decision, inicio, opts);
         }
 
         let mut escalador = Escalador::nuevo(decision.level.reintentos().max(1));
@@ -256,6 +264,14 @@ impl Brain {
         let mut recargas: u32 = 0;
         let mut rondas: u8 = 0;
         let mut recuperacion: Vec<String> = Vec::new();
+        // Presupuesto de tools del Plan vigente: se reinicia solo cuando cambia el
+        // plan firmado. Reiniciarlo cada ronda multiplica `max_write_actions` por
+        // el número de rondas.
+        let mut consumo: (u32, u32) = (0, 0);
+        let mut plan_vigente: Option<String> = None;
+        // Última salida con su presupuesto, por si hay que entregar sin volver a
+        // generar (rondas agotadas).
+        let mut ultima: Option<(Plan, GenerationResult, Preparado)> = None;
 
         loop {
             if opts.cancelar.cancelado() {
@@ -263,16 +279,39 @@ impl Brain {
             }
             rondas += 1;
             if rondas > MAX_RONDAS {
-                return Err(BrainError::Timeout);
+                // El presupuesto de rondas se acabó. Si en alguna ronda hubo
+                // salida, se entrega lo que hay —marcado como sin verificar—;
+                // convertirlo en un error tiraría a la basura minutos de modelo.
+                let (plan, g, preparado) = match ultima.take() {
+                    Some(u) => u,
+                    None => return Err(BrainError::Timeout),
+                };
+                recuperacion.push("rondas de herramientas agotadas".into());
+                return Ok(self.resultado(
+                    req,
+                    &plan,
+                    &g,
+                    vec![],
+                    VerificationResult::NoRequerida,
+                    OutputStatus::SinVerificar,
+                    inicio,
+                    reintentos,
+                    recargas,
+                    &preparado,
+                ));
             }
 
             let (pie, porque_modelo) = self.planificar(req, &decision).await?;
             let plan = pie.plan.clone();
+            if plan_vigente.as_deref() != plan.plan_hash.as_deref() {
+                plan_vigente = plan.plan_hash.clone();
+                consumo = (0, 0);
+            }
             if pie.degradado {
                 recuperacion.push(plan.reason.clone());
             }
-            self.emitir(&opts, BrainEvent::PlanCreated(plan.clone()));
-            self.emitir(&opts, BrainEvent::ModeloElegido {
+            self.emitir(opts, BrainEvent::PlanCreated(plan.clone()));
+            self.emitir(opts, BrainEvent::ModeloElegido {
                 modelo: plan.model.clone(),
                 porque: porque_modelo,
                 desvio: req
@@ -287,7 +326,7 @@ impl Brain {
                 recargas += 1;
             }
 
-            let g = match self.generar(&plan, &preparado, req, &opts).await {
+            let g = match self.generar(&plan, &preparado, req, opts).await {
                 Ok(g) => g,
                 Err(e) => {
                     let clase = classifier::clasificar(&classifier::Origen::Error(&e));
@@ -295,7 +334,7 @@ impl Brain {
                         Accion::Reintentar { porque, intento, .. } => {
                             reintentos = intento;
                             recuperacion.push(porque);
-                            self.emitir(&opts, BrainEvent::Reintento { clase, intento });
+                            self.emitir(opts, BrainEvent::Reintento { clase, intento });
                             continue;
                         }
                         Accion::NuevoPlan {
@@ -317,12 +356,34 @@ impl Brain {
                 }
             };
 
+            // Se guarda la ronda por si el presupuesto de rondas se agota después:
+            // mejor entregar esto marcado como sin verificar que tirar los minutos.
+            ultima = Some((plan.clone(), g.clone(), preparado.clone()));
+
             // Tools: se ejecutan lo que el Plan y el producto dejan; lo demás se
             // rechaza en código y se le dice al modelo.
             if !g.tool_calls.is_empty() {
-                let (llamadas, algo_se_ejecuto) = self
-                    .herramientas_del_turno(&plan, &g, req, &opts)
+                let (llamadas, algo_se_ejecuto, nuevo_consumo) = self
+                    .herramientas_del_turno(&plan, &g, req, opts, consumo)
                     .await;
+                consumo = nuevo_consumo;
+                // Lo que devolvió cada tool entra en el turno siguiente como
+                // observación. Sin esto el modelo nunca lee el resultado y repite
+                // la misma llamada hasta agotar las rondas: medido, ocho
+                // generaciones idénticas y un `Timeout` por cara.
+                for c in llamadas.iter() {
+                    if let Some(r) = &c.resultado {
+                        observaciones.push(format!(
+                            "{} devolvió: {}",
+                            c.tool,
+                            if r.chars().count() > 4000 {
+                                r.chars().take(4000).collect::<String>()
+                            } else {
+                                r.clone()
+                            }
+                        ));
+                    }
+                }
                 if algo_se_ejecuto {
                     continue;
                 }
@@ -343,7 +404,7 @@ impl Brain {
 
             let verificacion = self.verificar_salida(req, &plan, &g.texto);
             self.emitir(
-                &opts,
+                opts,
                 BrainEvent::Verificacion {
                     clase: if verificacion.es_pass() {
                         VerificacionEvent::Pass
@@ -387,6 +448,24 @@ impl Brain {
                 ));
             }
 
+            if matches!(verificacion, VerificationResult::NoRequerida) {
+                // El Plan no pidió verificación —es lo que firma un N0—, así que
+                // no hay nada que reparar: reintentar sería cobrarle una segunda
+                // llamada al modelo por un turno que no tenía nada que comprobar.
+                return Ok(self.resultado(
+                    req,
+                    &plan,
+                    &g,
+                    vec![],
+                    verificacion,
+                    OutputStatus::Propuesto,
+                    inicio,
+                    reintentos,
+                    recargas,
+                    &preparado,
+                ));
+            }
+
             let (clase, porque) = match &verificacion {
                 VerificationResult::Fail { clase, motivo } => (*clase, motivo.clone()),
                 _ => (FailureClass::Formato, "sin clase".to_string()),
@@ -399,9 +478,9 @@ impl Brain {
                 } => {
                     reintentos = intento;
                     recuperacion.push(format!("{porque} → {por}"));
-                    self.emitir(&opts, BrainEvent::Reintento { clase, intento });
+                    self.emitir(opts, BrainEvent::Reintento { clase, intento });
                     if ajustes.retractar {
-                        self.emitir(&opts, BrainEvent::StreamRetracted {
+                        self.emitir(opts, BrainEvent::StreamRetracted {
                             motivo: porque.clone(),
                         });
                     }
@@ -410,8 +489,12 @@ impl Brain {
                             "La respuesta anterior no cumplió el contrato; se reintentó con más contexto.".into(),
                         );
                     } else {
+                        // `porque` trae el motivo del veredicto, y ese motivo puede
+                        // ser una línea del archivo o el stderr de un comando. Sin
+                        // redactar, el reintento se lleva ese texto al proveedor.
                         observaciones.push(format!(
-                            "Tu respuesta anterior fue rechazada: {porque}. Entrega la salida en el contrato pedido."
+                            "Tu respuesta anterior fue rechazada: {}. Entrega la salida en el contrato pedido.",
+                            crate::security::redact::texto(&porque)
                         ));
                     }
                     continue;
@@ -593,7 +676,7 @@ impl Brain {
             history: req.history.clone(),
             tools: self.schemas_de(&plan.tools),
             num_ctx: plan.num_ctx,
-            keep_alive: plan.keep_alive.clone(),
+            keep_alive: plan.keep_alive,
             thinking: plan.thinking,
             max_output_tokens: plan.max_output_tokens,
             temperature: 0.0,
@@ -605,17 +688,30 @@ impl Brain {
             let mut texto = String::new();
             let mut final_r: Option<GenerationResult> = None;
             let inicio = std::time::Instant::now();
-            while let Some(parte) = stream.next().await {
+            // El timeout del proveedor va en la petición, pero si la conexión se
+            // abre y no vuelve a enviar nada, ese timeout no llega a correr nunca:
+            // el turno queda colgado hasta que alguien cancele a mano. Aquí se le
+            // pone fecha de vencimiento al drenado del stream.
+            let limite = std::time::Duration::from_secs(plan.timeout_s.max(1) as u64);
+            loop {
+                let queda = limite.saturating_sub(inicio.elapsed());
+                if queda.is_zero() {
+                    return Err(BrainError::Timeout);
+                }
                 if opts.cancelar.cancelado() {
                     return Err(BrainError::Cancelled);
                 }
-                match parte.map_err(con_error)? {
-                    StreamDelta::Texto(t) => {
-                        texto.push_str(&t);
-                        self.emitir(opts, BrainEvent::Token(t));
-                    }
-                    StreamDelta::Razonamiento(t) => self.emitir(opts, BrainEvent::Reasoning(t)),
-                    StreamDelta::Final(r) => final_r = Some(r),
+                match tokio::time::timeout(queda, stream.next()).await {
+                    Err(_) => return Err(BrainError::Timeout),
+                    Ok(None) => break,
+                    Ok(Some(parte)) => match parte.map_err(con_error)? {
+                        StreamDelta::Texto(t) => {
+                            texto.push_str(&t);
+                            self.emitir(opts, BrainEvent::Token(t));
+                        }
+                        StreamDelta::Razonamiento(t) => self.emitir(opts, BrainEvent::Reasoning(t)),
+                        StreamDelta::Final(r) => final_r = Some(r),
+                    },
                 }
             }
             let mut r = final_r.ok_or_else(|| {
@@ -647,8 +743,12 @@ impl Brain {
         g: &GenerationResult,
         req: &BrainRequest,
         opts: &OpcionesDeCorrida,
-    ) -> (Vec<ToolCall>, bool) {
-        let mut puerta = Puerta::nueva(plan, |t| self.herramientas.escribe(t));
+        consumo: (u32, u32),
+    ) -> (Vec<ToolCall>, bool, (u32, u32)) {
+        let mut puerta = Puerta::nueva(plan, |t| self.herramientas.escribe(t)).con_consumo(
+            consumo.0,
+            consumo.1,
+        );
         let mut out = Vec::new();
         let mut algo = false;
         for l in &g.tool_calls {
@@ -714,7 +814,7 @@ impl Brain {
                 }),
             }
         }
-        (out, algo)
+        (out, algo, puerta.consumo())
     }
 
     fn schemas_de(&self, tools: &[ToolId]) -> Vec<ToolSchema> {
@@ -747,6 +847,11 @@ impl Brain {
                 Some("es")
             },
             timeout_s: plan.timeout_s,
+            // El Brain no escribe archivos: aplicar el parche en una copia y
+            // correr el comando ahí le toca al producto. Sin eso el comando
+            // comprueba el estado anterior, y `determinista` lo dice en vez de
+            // dar un Pass que no es.
+            parche_aplicado: false,
         };
         let c = Candidato {
             texto,
@@ -771,7 +876,7 @@ impl Brain {
         recargas: u32,
         preparado: &Preparado,
     ) -> BrainResult {
-        let metrics = self.metricas(req, plan, g, inicio, reintentos, recargas, preparado);
+        let metrics = self.metricas(plan, g, inicio, reintentos, recargas, preparado);
         let r = BrainResult {
             output: Output {
                 texto: g.texto.clone(),
@@ -789,7 +894,6 @@ impl Brain {
 
     fn metricas(
         &self,
-        _req: &BrainRequest,
         plan: &Plan,
         g: &GenerationResult,
         inicio: std::time::Instant,
@@ -831,7 +935,6 @@ impl Brain {
     /// directa se devuelve como pendiente porque la ejecuta el producto.
     fn sin_generativo(
         &self,
-        req: &BrainRequest,
         d: &DecisionResult,
         inicio: std::time::Instant,
         opts: &OpcionesDeCorrida,
@@ -847,9 +950,27 @@ impl Brain {
             })
             .collect();
         let calculado = d.salida_directa.clone();
-        let mut plan = Plan::seguro(&req.mode, "sin-modelo".into(), "ninguno".into(), vec![]);
-        plan.reason = d.por_que.clone();
-        plan.num_ctx = 2048;
+        // El Fast Path decide su propio nivel. Envolverlo en `Plan::seguro` le
+        // subía a N1 —o a N2 en modo trabajo— una decisión N0 que además no
+        // llama a ningún modelo, y con eso el registro y la precisión de nivel
+        // del arnés decían otra cosa.
+        let mut plan = Plan::firmar(
+            d.level,
+            d.intent,
+            "sin-modelo".into(),
+            "ninguno".into(),
+            ExecutionTarget::Local,
+            d.level.num_ctx_minimo(),
+            ThinkingLevel::Off,
+            vec![],
+            d.output_contract,
+            d.verification,
+            d.por_que.clone(),
+        );
+        plan.risk = d.risk;
+        // 2048 es el suelo con el que la invariante de presupuesto de §11 se
+        // sostiene sin proveedor delante.
+        plan.num_ctx = plan.num_ctx.max(2048);
         plan.calcular_hash();
         let r = BrainResult {
             output: Output {
@@ -914,6 +1035,7 @@ impl Brain {
     }
 }
 
+#[derive(Clone)]
 struct Preparado {
     system: String,
     turno: String,

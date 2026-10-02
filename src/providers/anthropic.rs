@@ -346,10 +346,11 @@ impl ModelProvider for AnthropicProvider {
 /// Perfil aproximado por nombre de familia. Es describir, no elegir.
 pub fn perfil_por_nombre(id: &str) -> Profile {
     let b = id.to_lowercase();
+    // `Profile` no tiene término medio: es Nano (≤2B), Small (3–9B) o Large (>9B o
+    // nube). Haiku es el único de la familia que cae en Small; «sonnet» y lo
+    // desconocido acaban igual, así que no hay una rama que decida nada.
     if b.contains("haiku") {
         Profile::Small
-    } else if b.contains("sonnet") {
-        Profile::Large
     } else {
         Profile::Large
     }

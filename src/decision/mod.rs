@@ -58,7 +58,18 @@ impl DecisionResult {
             self.level = Level::N2;
             self.por_que.push_str(" · riesgo alto sube a N2");
         }
+        self.nivelar_verificacion();
         self
+    }
+
+    /// Después de subir el nivel por cualquier suelo (el modo, el riesgo), la
+    /// verificación tiene que subir con él. Un Plan que dice N2 y trae
+    /// `Ninguna` miente: firma un nivel que no comprueba nada, y el mínimo del
+    /// nivel es justo lo que §4 deja exigir.
+    pub fn nivelar_verificacion(&mut self) {
+        let minima =
+            crate::decision::rules::nivelacion_verificacion(self.level, &self.output_contract);
+        self.verification = self.verification.max(minima);
     }
 }
 

@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 use hatboo_brain::api::request::{BrainRequest, ProjectContext, ToolInfo, VerifyCommands};
 use hatboo_brain::api::vocab::{
-    ApprovalLevel, ExecutionPolicy, KeepAlive, Level, ThinkingLevel,
+    ApprovalLevel, ExecutionPolicy, KeepAlive, Level, Risk, ThinkingLevel,
 };
 use hatboo_brain::brain::{Brain, EjecutarTool, Montaje};
 use hatboo_brain::config::loader::Cargada;
@@ -62,6 +62,10 @@ struct Entrada {
     /// Lo que el Engine debería decidir. Mide la precisión del §3, no del modelo.
     #[serde(default, alias = "level_expected")]
     nivel_esperado: Option<Level>,
+    /// Riesgo que debería salir. Sin él, un 100 % de nivel puede estar llamando
+    /// `Low` a volcar una clave de API en un README compartido.
+    #[serde(default, alias = "risk_expected")]
+    riesgo_esperado: Option<Risk>,
     prompt: String,
     #[serde(default)]
     fixture: Option<String>,
@@ -83,6 +87,8 @@ struct Suite {
 
 struct Opciones {
     sondear: bool,
+    /// Solo el Engine, sin modelo: mide la toma de decisiones sobre la suite.
+    solo_decisiones: bool,
     suite: PathBuf,
     config: PathBuf,
     modelos: Vec<String>,
@@ -93,6 +99,9 @@ struct Opciones {
     solo_categoria: Option<String>,
     limite_salida: u32,
     contexto: Option<u32>,
+    /// Margen de RAM libre del Governor, para medir en máquinas de 8 GB donde
+    /// los 1500 MB de §11 no dejan cargar nada. No cambia el producto.
+    margen: Option<u64>,
     salida: Option<PathBuf>,
 }
 
@@ -100,6 +109,7 @@ impl Default for Opciones {
     fn default() -> Self {
         Opciones {
             sondear: false,
+            solo_decisiones: false,
             suite: PathBuf::from("benchmarks/base.json"),
             config: PathBuf::from("config"),
             modelos: Vec::new(),
@@ -109,6 +119,7 @@ impl Default for Opciones {
             solo_categoria: None,
             limite_salida: 1024,
             contexto: None,
+            margen: None,
             salida: None,
         }
     }
@@ -126,8 +137,12 @@ brain-bench — arnés de medición del Brain (§9)
   --categoria N       correr solo una categoría
   --toks N            tope de salida en tokens (default 1024)
   --ctx N             forzar num_ctx en vez de dejárselo al Governor
+  --margen N          MB libres que exige el Governor (su valor por defecto son
+                      1500, que en un portátil de 8 GB no deja cargar nada)
   --salida RUTA       volcar los datos crudos en JSON
   --sondear           medir RAM por ctx y probar tools/thinking; escribe models.sondeado.json
+  --decisiones        solo el Engine sobre la suite: precisión de nivel, riesgo,
+                      contrato, tools y presupuesto firmado. Sin modelo, sin RAM.
 ";
 
 fn parseo() -> Result<Opciones, String> {
@@ -186,6 +201,8 @@ fn parseo() -> Result<Opciones, String> {
             "--categoria" => o.solo_categoria = Some(val!("--categoria")),
             "--toks" => o.limite_salida = num!("--toks", u32),
             "--ctx" => o.contexto = Some(num!("--ctx", u32)),
+            "--margen" => o.margen = Some(num!("--margen", u64)),
+            "--decisiones" => o.solo_decisiones = true,
             "--salida" => {
                 let v = val!("--salida");
                 o.salida = Some(PathBuf::from(v));
@@ -227,10 +244,21 @@ impl SondaReal {
             }
             std::thread::sleep(Duration::from_secs(1));
         });
-        SondaReal {
+        let s = SondaReal {
             libre,
             cargados: Arc::new(Mutex::new(Vec::new())),
+        };
+        // La primera lectura cuesta medio segundo, y el Fast Path no gasta ni un
+        // milisegundo: sin esperar, la primera entrada que sí necesita modelo
+        // llegaría con la sonda a cero, el Governor diría «no afirma que quepa»
+        // y el arnés se pararía solo por culpa de la carrera.
+        for _ in 0..60 {
+            if s.libre_mb().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
+        s
     }
 
     fn guarda_cargados(&self, v: Vec<ModeloCargado>) {
@@ -392,9 +420,7 @@ fn ruta_de(raiz: &Path, ruta: &str) -> Option<PathBuf> {
             // Un `..` solo puede deshacer un tramo ya pisado: si la pila está
             // vacía, es que quiere salir de la raíz, y eso se rechaza en código.
             Component::ParentDir => {
-                if pila.pop().is_none() {
-                    return None;
-                }
+                pila.pop()?;
             }
             _ => return None,
         }
@@ -490,10 +516,7 @@ fn copia_fixture(origen: &Path, destino: &Path) -> Result<(), String> {
             let nombre = e.file_name();
             // `target/`, `node_modules/` y `.git/` de un fixture no se copian:
             // pesan gigas y no cambian el resultado de un `cargo check`.
-            if ["target", "node_modules", ".git"]
-                .iter()
-                .any(|x| nombre == std::ffi::OsString::from(*x))
-            {
+            if ["target", "node_modules", ".git"].iter().any(|x| nombre == *x) {
                 continue;
             }
             let adentro = destino.join(nombre);
@@ -720,6 +743,10 @@ async fn main() {
         );
         std::process::exit(2);
     }
+    if opts.solo_decisiones {
+        bateria_decisiones(&entradas, &config, &opts);
+        return;
+    }
     println!(
         "brain-bench {} · {} de {} entradas (split {}) · modelos [{}] · modo {} · reps {} · tope {} tokens",
         hatboo_brain::version(),
@@ -731,15 +758,21 @@ async fn main() {
         opts.reps,
         opts.limite_salida
     );
-    if let Some(l) = SondaReal::arrancar().libre_mb() {
+    // Una sola sonda para el aviso y para la corrida: la cabecera no puede
+    // preguntarle a una copia distinta de la que va a decidir.
+    let sonda = Arc::new(SondaReal::arrancar());
+    if let Some(l) = sonda.libre_mb() {
         println!("RAM libre medida: {l} MB");
     } else {
         println!(
-            "RAM libre: sin medir (el SO no la dio); el Governor puede rechazar cargas por prudencia"
+            "RAM libre: sin medir (el SO no la dio); el Governor rechazará las cargas, \
+             porque sin dato no se afirma que quepan"
         );
     }
+    if let Some(m) = opts.margen {
+        println!("margen del Governor puesto a {m} MB para esta corrida (por defecto serían 1500)");
+    }
 
-    let sonda = Arc::new(SondaReal::arrancar());
     let ejecutor = Arc::new(ComandoReal::default());
     let mut todas: Vec<Corrida> = Vec::new();
     for modelo in &modelos {
@@ -854,26 +887,21 @@ async fn ficha_de(config: &Cargada, ollama: &Arc<OllamaProvider>, modelo: &str) 
         .find(|m| m.id == modelo)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn una_corrida(
-    e: &Entrada,
-    rep: u32,
-    raiz: &Path,
-    opts: &Opciones,
-    config: &Cargada,
-    ollama: &Arc<OllamaProvider>,
-    sonda: &Arc<SondaReal>,
-    ejecutor: &Arc<ComandoReal>,
-    registry: &Registry,
-    modelo: &str,
-) -> Result<Corrida, String> {
-    let modo = match e.categoria.as_str() {
+/// La categoría decide el modo, como en la app: saludos y ambigüedad se contestan
+/// en chat; el resto es trabajo.
+fn modo_de(e: &Entrada) -> &'static str {
+    match e.categoria.as_str() {
         "saludo" | "ambiguedad" => "chat",
         _ => "work",
-    };
+    }
+}
+
+/// La petición que se le manda al Brain. La construye una sola función para que
+/// la batería de decisiones y la corrida midan exactamente el mismo pedido; si
+/// cada una montara su `BrainRequest`, la precisión mediría otra cosa.
+fn pedido_de(e: &Entrada, config: &Cargada, raiz: &Path, modelo: &str) -> BrainRequest {
     let raiz_texto = raiz.to_string_lossy().to_string();
-    let con_fixture = e.fixture.is_some();
-    let mut req = BrainRequest::nuevo("brain-bench", modo, &e.prompt)
+    let mut req = BrainRequest::nuevo("brain-bench", modo_de(e), &e.prompt)
         .con_modelo(modelo)
         .con_tools(
             config
@@ -893,9 +921,9 @@ async fn una_corrida(
     // que las dos cifras comparables (tokens y latencia) no dependan de cuánto
     // razona cada modelo. Se mide aparte, con --sondear.
     req.thinking_ceiling = Some(ThinkingLevel::Off);
-    if con_fixture {
+    if e.fixture.is_some() {
         req.project = Some(ProjectContext {
-            root: raiz_texto.clone(),
+            root: raiz_texto,
             has_tests: raiz.join("tests").is_dir() || raiz.join("package.json").is_file(),
             has_lint: false,
             has_build: raiz.join("Cargo.toml").is_file() || raiz.join("package.json").is_file(),
@@ -912,6 +940,25 @@ async fn una_corrida(
             },
         });
     }
+    req
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn una_corrida(
+    e: &Entrada,
+    rep: u32,
+    raiz: &Path,
+    opts: &Opciones,
+    config: &Cargada,
+    ollama: &Arc<OllamaProvider>,
+    sonda: &Arc<SondaReal>,
+    ejecutor: &Arc<ComandoReal>,
+    registry: &Registry,
+    modelo: &str,
+) -> Result<Corrida, String> {
+    let modo = modo_de(e);
+    let con_fixture = e.fixture.is_some();
+    let req = pedido_de(e, config, raiz, modelo);
 
     let inicio = Instant::now();
     let (texto, nivel, verificacion, estado, metricos) = if opts.modo == "baseline" {
@@ -932,14 +979,28 @@ async fn una_corrida(
         };
         (r.texto, None, "—".into(), "—".into(), m)
     } else {
-        let brain = arma_brain(opts, config, registry, ollama, sonda, ejecutor, raiz, con_fixture)?;
+        let brain = arma_brain(
+            opts,
+            config,
+            registry,
+            ollama,
+            sonda,
+            ejecutor,
+            con_fixture.then_some(raiz),
+        )?;
         let r = brain
             .run(&req)
             .await
             .map_err(|err| format!("run: {}", err.mensaje()))?;
         let estado = format!("{:?}", r.output.status);
         let verif = format!("{:?}", r.verification);
-        (r.output.texto.clone(), Some(format!("{:?}", r.plan.level)), verif, estado, r.metrics.clone())
+        (
+            r.output.texto.clone(),
+            Some(format!("{:?}", r.plan.level)),
+            verif,
+            estado,
+            r.metrics.clone(),
+        )
     };
 
     // Lo que quedó cargado después, para el informe de RAM.
@@ -1034,8 +1095,10 @@ fn arma_brain(
     ollama: &Arc<OllamaProvider>,
     sonda: &Arc<SondaReal>,
     ejecutor: &Arc<ComandoReal>,
-    raiz: &Path,
-    con_fixture: bool,
+    // La raíz es la copia del fixture: sin fixture no hay raíz que leer, así que
+    // un `Option` dice las dos cosas a la vez y el `raiz: &Path` + `con_fixture:
+    // bool` de antes deja de ser una pareja que tenía que cuadrar a mano.
+    fixture: Option<&Path>,
 ) -> Result<Brain, String> {
     let mut montaje = Montaje::de_proveedor(ollama.clone());
     montaje.registry = registry.clone();
@@ -1043,7 +1106,7 @@ fn arma_brain(
     montaje.herramientas = config.herramientas.clone();
     montaje.sonda = sonda.clone();
     montaje.contador = Arc::new(Estimador);
-    if con_fixture {
+    if let Some(raiz) = fixture {
         montaje.ejecutor_tools = Some(Arc::new(ToolsDelArnies {
             raiz: raiz.to_path_buf(),
             ejecutor: ejecutor.clone(),
@@ -1054,13 +1117,168 @@ fn arma_brain(
             ruta_de(&r, ruta).and_then(|p| std::fs::read_to_string(p).ok())
         }));
     }
-    let mut cfg = BrainConfig::default();
-    cfg.dir_config = Some(opts.config.clone());
+    let mut cfg = BrainConfig {
+        dir_config: Some(opts.config.clone()),
+        ..Default::default()
+    };
     if let Some(ctx) = opts.contexto {
         cfg.governor.ctx_permitidos = vec![ctx];
     }
+    if let Some(m) = opts.margen {
+        cfg.governor.margen_mb = m;
+    }
     montaje.config = cfg;
     Brain::nuevo(montaje).map_err(|e| format!("Brain::nuevo: {}", e.mensaje()))
+}
+
+/// La batería de decisiones: pasa las entradas por el Engine sin tocar al modelo
+/// ni la RAM. Mide §3 —qué decide el Brain, a qué coste en tokens y en contexto—
+/// y cuesta milisegundos, así que se puede correr a diario.
+fn bateria_decisiones(entradas: &[&Entrada], config: &Cargada, opts: &Opciones) {
+    use hatboo_brain::decision::engine::Motor;
+    let raiz_suite = opts.suite.parent().unwrap_or_else(|| Path::new("."));
+    let mut aciertos = 0usize;
+    let mut medidos = 0usize;
+    let mut aciertos_riesgo = 0usize;
+    let mut medidos_riesgo = 0usize;
+    let mut fallos: Vec<String> = Vec::new();
+    let mut por_categoria: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut niveles: BTreeMap<String, usize> = BTreeMap::new();
+    let mut riesgos: BTreeMap<String, usize> = BTreeMap::new();
+    let mut contratos: BTreeMap<String, usize> = BTreeMap::new();
+    let mut con_tools = 0usize;
+    let mut atajo = 0usize;
+    let mut microses: Vec<u64> = Vec::new();
+    let mut franjas: BTreeMap<&'static str, usize> = BTreeMap::new();
+
+    for &e in entradas {
+        // El fixture se lee de su carpeta original: la decisión solo mira si hay
+        // tests o build, y eso es idéntico en la copia que usa la corrida.
+        let raiz = match &e.fixture {
+            Some(f) => raiz_suite.join(f.trim_start_matches("benchmarks/").trim_start_matches("./")),
+            None => raiz_suite.to_path_buf(),
+        };
+        let req = pedido_de(e, config, &raiz, "");
+        let mut motor = Motor::nuevo(config.reglas.clone());
+        let t0 = Instant::now();
+        let d = motor.evaluar(&req);
+        microses.push(t0.elapsed().as_micros() as u64);
+
+        if d.source == hatboo_brain::api::vocab::DecisionSource::FastPath {
+            atajo += 1;
+        }
+        if !d.tools.is_empty() {
+            con_tools += 1;
+        }
+        *niveles.entry(format!("{:?}", d.level)).or_default() += 1;
+        *riesgos.entry(format!("{:?}", d.risk)).or_default() += 1;
+        *contratos
+            .entry(format!("{:?}", d.output_contract))
+            .or_default() += 1;
+        // §1 usa 0,85 y 0,55. Si los valores reales son siempre 1,0 o ~0,15, la
+        // banda del medio no existe y no hay fórmula que tocar: se mide antes de
+        // suponerlo.
+        let conf = d.confidence.valor();
+        let franja = if conf >= 0.85 {
+            "≥0,85 (alto)"
+        } else if conf >= 0.55 {
+            "0,55–0,85 (media)"
+        } else if conf > 0.0 {
+            "<0,55 (duda)"
+        } else {
+            "0,00 (empate)"
+        };
+        *franjas.entry(franja).or_insert(0usize) += 1;
+
+        if let Some(esperado) = e.riesgo_esperado {
+            medidos_riesgo += 1;
+            if d.risk == esperado {
+                aciertos_riesgo += 1;
+            } else {
+                fallos.push(format!(
+                    "  {} · riesgo esperado {:?} · decidió {:?} · nivel {:?} · conf {:.2} · {}",
+                    e.id, esperado, d.risk, d.level, d.confidence.valor(), d.por_que
+                ));
+            }
+        }
+
+        if let Some(esperado) = e.nivel_esperado {
+            medidos += 1;
+            let c = por_categoria.entry(e.categoria.clone()).or_default();
+            c.1 += 1;
+            if d.level == esperado {
+                aciertos += 1;
+                c.0 += 1;
+            } else {
+                fallos.push(format!(
+                    "  {} · esperaba {:?} · decidió {:?} · riesgo {:?} · contrato {:?} · tools {} · conf {:.2} · {}",
+                    e.id,
+                    esperado,
+                    d.level,
+                    d.risk,
+                    d.output_contract,
+                    d.tools.len(),
+                    d.confidence.valor(),
+                    d.por_que
+                ));
+            }
+        }
+    }
+
+    println!("\n=== batería de decisiones · {} entradas ===", entradas.len());
+    println!(
+        "nivel esperado: {aciertos}/{medidos} = {} %",
+        (aciertos * 100).checked_div(medidos).unwrap_or(0)
+    );
+    for (cat, (a, t)) in &por_categoria {
+        println!("  {cat:<12} {a}/{t}");
+    }
+    println!(
+        "riesgo esperado: {aciertos_riesgo}/{medidos_riesgo} = {} %",
+        (aciertos_riesgo * 100)
+            .checked_div(medidos_riesgo)
+            .unwrap_or(0)
+    );
+    for f in &fallos {
+        println!("{f}");
+    }
+    let mut ms = microses.clone();
+    ms.sort_unstable();
+    let suma: u64 = ms.iter().sum();
+    println!(
+        "decidir: media {} µs · mediana {} µs · peor {} µs · sin tocar modelo ni RAM",
+        if ms.is_empty() { 0 } else { suma / ms.len() as u64 },
+        if ms.is_empty() { 0 } else { ms[ms.len() / 2] },
+        ms.last().copied().unwrap_or(0)
+    );
+    println!("  Fast Path {} de {} · con tools {} de {}", atajo, entradas.len(), con_tools, entradas.len());
+    println!("  niveles: {:?}", niveles);
+    println!("  riesgos: {:?}", riesgos);
+    println!("  contratos: {:?}", contratos);
+    println!("  confianza: {:?}", franjas);
+    // Cuánto contexto y salida firma cada lote: es el coste que el Engine está
+    // asignando antes de que nadie escriba una línea. Se leen las mismas funciones
+    // con las que se firma el Plan, no una copia a mano.
+    let mut ctx_total = 0u32;
+    let mut out_total = 0u32;
+    for &e in entradas {
+        let raiz = match &e.fixture {
+            Some(f) => raiz_suite.join(f.trim_start_matches("benchmarks/").trim_start_matches("./")),
+            None => raiz_suite.to_path_buf(),
+        };
+        let req = pedido_de(e, config, &raiz, "");
+        let mut motor = Motor::nuevo(config.reglas.clone());
+        let d = motor.evaluar(&req);
+        ctx_total += hatboo_brain::planner::plan::default_context_budget(d.level);
+        out_total += hatboo_brain::planner::plan::default_max_output(d.level);
+    }
+    println!(
+        "asignado por el Engine: {} de contexto y {} de salida en total (media {} / {} por turno)",
+        ctx_total,
+        out_total,
+        ctx_total / entradas.len().max(1) as u32,
+        out_total / entradas.len().max(1) as u32
+    );
 }
 
 fn informe(todas: &[Corrida], opts: &Opciones) {
@@ -1078,7 +1296,7 @@ fn informe(todas: &[Corrida], opts: &Opciones) {
         let resultados: Vec<&str> = v.iter().map(|c| c.resultado.as_str()).collect();
         if resultados.iter().all(|x| *x == "pasa") {
             pasa += 1;
-        } else if resultados.iter().any(|x| *x == "falla") {
+        } else if resultados.contains(&"falla") {
             falla += 1;
         } else {
             sin_comprobar += 1;

@@ -73,6 +73,10 @@ impl OpenAiProvider {
             "model": req.model,
             "messages": mensajes,
             "stream": true,
+            // Sin esto la API no manda el chunk de `usage` en modo stream, el
+            // conteo sale `None`, y el log anota el turno como si hubiera salido
+            // gratis.
+            "stream_options": { "include_usage": true },
             "temperature": req.temperature,
             // En `/chat/completions` el tope de salida es `max_tokens`; con
             // razonamiento encendido los modelos nuevos solo aceptan

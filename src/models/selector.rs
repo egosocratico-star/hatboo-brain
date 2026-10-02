@@ -112,8 +112,14 @@ pub fn elegir(
     }
 
     // Nada cabe: si la policy es `local_only` NO se cae a una API (§15.2 del plan).
+    // La cifra que se dice lleva dentro el margen del Governor, que es lo que de
+    // verdad hizo falta: decir solo los MB del modelo produce un «hacen falta 878
+    // y quedan 1128» que parece un error de aritmética.
     let (needed_mb, free_mb) = match mas_barato {
-        Some((ram, c)) => (ram as u32, c.libre_mb.unwrap_or(0) as u32),
+        Some((ram, c)) => (
+            (ram + governor.config.margen_mb) as u32,
+            c.libre_mb.unwrap_or(0) as u32,
+        ),
         _ => (0, 0),
     };
     Err(BrainError::ResourceExhausted {
@@ -303,7 +309,9 @@ mod tests {
         let err = elegir(&req, &decision(Level::N0, vec![]), &r, &gov(), &sonda).unwrap_err();
         match err {
             BrainError::ResourceExhausted { needed_mb, free_mb } => {
-                assert_eq!(needed_mb, 900);
+                // 900 del modelo + 1500 del margen que exige el Governor: las dos
+                // cifras tienen que sumar, si no el aviso parece un error.
+                assert_eq!(needed_mb, 2400);
                 assert_eq!(free_mb, 300);
             }
             otro => panic!("{otro:?}"),

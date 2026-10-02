@@ -166,7 +166,9 @@ fn nada_cabe_dan_las_cifras_y_es_recuperable() {
     let err = elegir(&req, &lote(Level::N0, vec![]), &reg, &gov(), &sonda).unwrap_err();
     match err {
         BrainError::ResourceExhausted { needed_mb, free_mb } => {
-            assert_eq!(needed_mb, 900);
+            // 900 del modelo + 1500 de margen del Governor: lo que se dice es lo
+            // que hizo falta, no lo que pesa el modelo a secas.
+            assert_eq!(needed_mb, 2400);
             assert_eq!(free_mb, 300);
         }
         otro => panic!("{otro:?}"),

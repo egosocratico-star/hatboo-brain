@@ -16,10 +16,16 @@ pub fn normalizar(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut espacio = true;
     for ch in s.chars().flat_map(char::to_lowercase) {
-        if ch.is_alphanumeric() {
-            out.push(ch);
-            espacio = false;
-        } else if ch == '.' || ch == '/' || ch == '\\' || ch == '-' || ch == '_' {
+        // Lo que va a `out` sin abrir un espacio: letras, números y los signos que
+        // forman una ruta. Separadores (`/` incluido) y letras van al mismo lado
+        // porque partir una ruta por la mitad volvería irreconocible el archivo.
+        if ch.is_alphanumeric()
+            || ch == '.'
+            || ch == '/'
+            || ch == '\\'
+            || ch == '-'
+            || ch == '_'
+        {
             out.push(ch);
             espacio = false;
         } else if !espacio {
@@ -63,6 +69,12 @@ impl DecisionResult {
 pub fn aritmetica(s: &str) -> Option<String> {
     let limpio = s.trim().trim_end_matches('=').trim_end_matches('?');
     if limpio.is_empty() || !limpio.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    // Una sola operación de nivel cero. Con dos o más, lo más probable es que
+    // sea una fecha o una versión, y contestar un número por no haber sabido
+    // leerla es peor que dejarlo al modelo.
+    if operadores_en_nivel_cero(limpio) > 1 {
         return None;
     }
     let mut it = limpio.chars().peekable();
@@ -178,10 +190,53 @@ pub fn parece_ruta(s: &str) -> Option<String> {
         .find(|w| {
             let tiene_sep = w.contains('/') || w.contains('\\');
             let punto = w.rfind('.').unwrap_or(0);
-            let tiene_ext = punto > 0 && w.len() - punto <= 6 && w[punto + 1..].chars().all(char::is_alphanumeric);
+            // Solo se corta por bytes cuando hay punto: `punto + 1` cae en medio
+            // de un carácter multibyte si el token no lleva punto ninguno («¿qué»).
+            let (nombre, ext) = if punto > 0 {
+                (&w[..punto], &w[punto + 1..])
+            } else {
+                ("", "")
+            };
+            // La extensión tiene que tener letras, y el nombre también: sin esto
+            // «12.99», «3.11» o «v1.2» pasaban por ruta, el Fast Path pedía leer
+            // un archivo inexistente y la salida volvía vacía — el mismo bicho
+            // del saludo, por otro camino.
+            let tiene_ext = punto > 0
+                && ext.len() <= 5
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && ext.chars().any(|c| c.is_ascii_alphabetic())
+                && nombre.chars().any(|c| c.is_ascii_alphabetic());
             (tiene_sep || tiene_ext) && w.chars().count() >= 3 && !w.starts_with('.')
         })?;
     Some(candidato.to_string())
+}
+
+/// Cuántos operadores hay fuera de paréntesis. Una expresión con más de uno sin
+/// paréntesis alrededor es ambigua: «12/03/2026» es una fecha y «2024-01-15»
+/// también, y ninguna de las dos es una cuenta que se pueda resolver en código.
+fn operadores_en_nivel_cero(s: &str) -> usize {
+    let mut profundidad = 0i32;
+    let mut vistos = 0usize;
+    let mut anterior_es_operando = false;
+    for c in s.chars() {
+        match c {
+            '(' | '[' => profundidad += 1,
+            ')' | ']' => {
+                profundidad -= 1;
+                anterior_es_operando = true;
+            }
+            '+' | '-' | '*' | 'x' | 'X' | '/' | '%' => {
+                if profundidad == 0 && anterior_es_operando {
+                    vistos += 1;
+                }
+                anterior_es_operando = false;
+            }
+            '0'..='9' | '.' => anterior_es_operando = true,
+            ' ' | '\t' => {}
+            _ => anterior_es_operando = false,
+        }
+    }
+    vistos
 }
 
 impl Reglas {
@@ -192,17 +247,22 @@ impl Reglas {
             return None;
         }
 
-        // 1 · Saludos y cortesías: N0, sin modelo. El `reason` lo ve el usuario.
+        // 1 · Saludos y cortesías: N0, sin tools y con la salida corta. El `reason`
+        // lo ve el usuario. Lo que NO hace es saltarse el modelo: saltárselo
+        // exige traer la respuesta calculada, y un saludo no la trae — devolverlo
+        // vacío era el bicho.
         let solo_saludo = self
             .saludos
             .iter()
             .any(|s| normalizar(s) == n || n.split(' ').all(|w| self.saludos.iter().any(|s| normalizar(s) == w)));
         if solo_saludo && message.chars().count() <= 40 {
-            return Some(DecisionResult::rapido(
+            let mut d = DecisionResult::rapido(
                 Intent::Ask,
                 OutputContract::Texto,
                 "fast path · saludo".into(),
-            ));
+            );
+            d.skip_generative = false;
+            return Some(d);
         }
 
         // 2 · Aritmética: «20+8» no merece un LLM.
@@ -257,13 +317,16 @@ mod tests {
     }
 
     #[test]
-    fn un_saludo_no_gasta_modelo() {
+    fn un_saludo_se_qeda_en_n0_pero_lo_contesta_el_modelo() {
         let d = reglas().fast_path("¡Hola!", "chat").expect("saludo");
         assert_eq!(d.level, Level::N0);
-        assert!(d.skip_generative);
-        assert_eq!(d.confidence, Confidence(1.0));
         assert_eq!(d.source, DecisionSource::FastPath);
+        assert_eq!(d.confidence, Confidence(1.0));
         assert!(d.tools.is_empty());
+        // El atajo decidió la forma, no la respuesta: sin `salida_directa` no
+        // puede decir que se salta el modelo, o la burbuja sale vacía.
+        assert!(!d.skip_generative);
+        assert!(d.salida_directa.is_none());
     }
 
     #[test]
@@ -281,6 +344,12 @@ mod tests {
         assert_eq!(aritmetica("cuánto es 20+8 en binario?"), None);
         assert_eq!(aritmetica("1/0"), None);
         assert_eq!(aritmetica("hola"), None);
+        // Dos operadores de nivel cero: es una fecha o una versión, no una cuenta.
+        assert_eq!(aritmetica("12/03/2026"), None);
+        assert_eq!(aritmetica("2024-01-15"), None);
+        assert_eq!(aritmetica("1.2.3"), None);
+        // Una resta con negativos sigue siendo una cuenta.
+        assert_eq!(aritmetica("-5+3").as_deref(), Some("-2"));
     }
 
     #[test]
@@ -291,6 +360,21 @@ mod tests {
         assert!(d.skip_generative);
         // Y no es una tool que llame el modelo: el Plan no lleva tools.
         assert!(d.tools.is_empty());
+    }
+
+    #[test]
+    fn un_numero_no_es_un_archivo() {
+        // «muestra 12.99» se leía como una ruta, el Fast Path pedía leer un
+        // archivo que no existe y la salida volvía vacía.
+        for s in ["muestra 12.99", "peso 3.11 kg", "versión v1.2", "12.99"] {
+            assert_eq!(parece_ruta(s), None, "{s}");
+        }
+        // Sin punto en el token no se corta por bytes: «¿» ocupa dos y el corte
+        // caía en medio del carácter. Pánico, no un `None`.
+        assert_eq!(parece_ruta("¿qué tal vas?"), None);
+        for s in ["abre main.rs", "mira src/lib/rs", "config.toml", "léeme.md"] {
+            assert!(parece_ruta(s).is_some(), "{s}");
+        }
     }
 
     #[test]

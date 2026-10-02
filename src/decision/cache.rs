@@ -67,6 +67,14 @@ impl CacheDecisiones {
             None => partes.push("-".into()),
         }
         partes.push(format!("{:?}", req.thinking_ceiling));
+        // Lo que el producto añade después de un fallo también decide: si no
+        // entra en la clave, el mismo mensaje reenviado con riesgo High o con un
+        // fallo encima se come la decisión vieja durante todo el TTL.
+        partes.push(format!("{:?}", req.risk_hint));
+        partes.push(match req.session_failures.last() {
+            Some(f) => format!("{f:?}"),
+            None => "-".into(),
+        });
         hash::fnv1a64(&partes.join("\u{1}"))
     }
 

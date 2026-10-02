@@ -471,7 +471,7 @@ impl OllamaProvider {
         let ctx = if arch.is_empty() {
             None
         } else {
-            info.get(&format!("{arch}.context_length"))
+            info.get(format!("{arch}.context_length"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32)
         };

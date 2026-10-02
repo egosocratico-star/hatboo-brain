@@ -53,7 +53,7 @@ const ESQUEMAS: &[&str] = &["bearer", "basic", "token", "apikey", "api_key", "ke
 /// Dónde acaba un valor a partir de `i`: el primer delimitador real.
 fn fin_del_valor(s: &str, i: usize) -> usize {
     s[i..]
-        .find(|c: char| matches!(c, '"' | '\'' | ' ' | ',' | ';' | '\n' | '\r' | '}'))
+        .find(['"', '\'', ' ', ',', ';', '\n', '\r', '}'])
         .map(|k| i + k)
         .unwrap_or(s.len())
 }

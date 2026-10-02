@@ -11,7 +11,7 @@ pub mod string_serde {
     use super::redact;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(s: &String, ser: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(s: &str, ser: S) -> Result<S::Ok, S::Error> {
         ser.serialize_str(&redact::texto(s))
     }
 

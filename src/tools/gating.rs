@@ -1,7 +1,7 @@
 //! La puerta. Dos controles distintos que no hay que mezclar:
 //! - **dentro del Plan**: ¿esta tool está en `plan.tools`?
 //! - **presupuesto**: ¿quedan llamadas / escrituras?
-//! Ambos se deciden en código, antes de que nada se ejecute.
+//!   Ambos se deciden en código, antes de que nada se ejecute.
 
 use crate::api::vocab::ToolId;
 use crate::planner::Plan;
@@ -44,6 +44,15 @@ impl<'a> Puerta<'a> {
             escrituras: 0,
             escribe: Box::new(escribe),
         }
+    }
+
+    /// Arranca con el presupuesto ya gastado en rondas anteriores del **mismo**
+    /// Plan. Sin esto, construir la puerta cada ronda pone los contadores a cero
+    /// y `max_write_actions` se multiplica por el número de rondas.
+    pub fn con_consumo(mut self, llamadas: u32, escrituras: u32) -> Self {
+        self.llamadas = llamadas;
+        self.escrituras = escrituras;
+        self
     }
 
     /// Comprueba y **consume** presupuesto si pasa. Llamar a `autorizar` dos veces
@@ -155,5 +164,24 @@ mod tests {
         let p = plan(&[], 8, 3);
         let mut g = puerta(&p);
         assert_eq!(g.autorizar("read_file"), Deciso::RechazadaFueraDelPlan);
+    }
+
+    #[test]
+    fn el_presupuesto_se_hereda_entre_rondas_del_mismo_plan() {
+        // Reconstruir la puerta cada ronda poniendo los contadores a cero era el
+        // agujero: tres escrituras firmadas acababan en una por ronda.
+        let p = plan(&["write_file"], 8, 3);
+        let mut ronda_1 = puerta(&p);
+        for _ in 0..3 {
+            assert!(ronda_1.autorizar("write_file").permitida());
+        }
+        let gastado = ronda_1.consumo();
+        assert_eq!(gastado.1, 3);
+        let mut ronda_2 = Puerta::nueva(&p, |t| t == "write_file").con_consumo(gastado.0, gastado.1);
+        assert_eq!(
+            ronda_2.autorizar("write_file"),
+            Deciso::RechazadaPresupuestoEscrituras,
+            "la ronda nueva no puede gastar escrituras que el Plan ya agotó"
+        );
     }
 }

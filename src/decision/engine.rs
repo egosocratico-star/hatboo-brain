@@ -71,6 +71,25 @@ pub fn tiene_codigo(s: &str) -> bool {
         >= 2
 }
 
+/// ¿Se dijo la palabra, o es solo un trozo de otra? `contains` leía
+/// «programación» como «rama» (→ git, N2 y tres tools) y «install» como `all`
+/// (→ riesgo). Cada falso positivo cuesta contexto, tokens y tiempo de modelo.
+fn dice_palabra(texto: &str, palabra: &str) -> bool {
+    if palabra.is_empty() {
+        return false;
+    }
+    // Un guion cuenta como parte de la palabra: `llama-3.3` o `src/main.rs`
+    // llevan, y partirlos por la mitad volvería a dar falsos positivos.
+    let es_parte = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    texto.match_indices(palabra).any(|(i, _)| {
+        let antes_libre = i == 0 || !es_parte(texto[..i].chars().next_back().unwrap());
+        let fin = i + palabra.len();
+        let despues_libre =
+            fin == texto.len() || !es_parte(texto[fin..].chars().next().unwrap());
+        antes_libre && despues_libre
+    })
+}
+
 /// Todas las señales del turno. Aquí se calculan; en `brain-rules.json` se
 /// interpretan.
 pub fn senales(req: &BrainRequest, reglas: &Reglas) -> Signals {
@@ -81,7 +100,7 @@ pub fn senales(req: &BrainRequest, reglas: &Reglas) -> Signals {
             reglas
                 .riesgo_alto
                 .iter()
-                .any(|p| bajo.contains(&p.to_lowercase()))
+                .any(|p| dice_palabra(&bajo, &p.to_lowercase()))
         };
         // Verbo que destruye + objeto que se puede perder. La misma mediada en los
         // dos idiomas, porque el riesgo no depende de en qué lengua se escribió.
@@ -89,11 +108,11 @@ pub fn senales(req: &BrainRequest, reglas: &Reglas) -> Signals {
             let verbo = reglas
                 .riesgo_destructivo
                 .iter()
-                .any(|v| bajo.contains(&v.to_lowercase()));
+                .any(|v| dice_palabra(&bajo, &v.to_lowercase()));
             let objeto = reglas
                 .riesgo_objeto
                 .iter()
-                .any(|o| bajo.contains(&o.to_lowercase()));
+                .any(|o| dice_palabra(&bajo, &o.to_lowercase()));
             verbo && objeto
         };
         if alto() || devastador() {
@@ -101,7 +120,7 @@ pub fn senales(req: &BrainRequest, reglas: &Reglas) -> Signals {
         } else if reglas
             .riesgo_medio
             .iter()
-            .any(|p| bajo.contains(&p.to_lowercase()))
+            .any(|p| dice_palabra(&bajo, &p.to_lowercase()))
         {
             Risk::Medium
         } else {
@@ -115,15 +134,23 @@ pub fn senales(req: &BrainRequest, reglas: &Reglas) -> Signals {
         has_action_verb: reglas
             .verbos_accion
             .iter()
-            .any(|v| bajo.contains(&v.to_lowercase())),
+            .any(|v| dice_palabra(&bajo, &v.to_lowercase())),
         mentions_git: reglas
             .menciona_git
             .iter()
-            .any(|p| bajo.contains(&p.to_lowercase())),
+            .any(|p| dice_palabra(&bajo, &p.to_lowercase())),
         mentions_web: reglas
             .menciona_web
             .iter()
-            .any(|p| bajo.contains(&p.to_lowercase())),
+            .any(|p| dice_palabra(&bajo, &p.to_lowercase())),
+        mentions_project_files: reglas
+            .menciona_archivos
+            .iter()
+            .any(|p| dice_palabra(&bajo, &p.to_lowercase())),
+        mentions_command: reglas
+            .menciona_comando
+            .iter()
+            .any(|p| dice_palabra(&bajo, &p.to_lowercase())),
         risk_hint: riesgo,
         session_failure: req.session_failures.last().copied(),
         project_has_tests: req.tiene_tests(),
@@ -247,10 +274,10 @@ impl Motor {
 fn heuristica(req: &BrainRequest, s: &Signals, herramientas: &[ToolId]) -> DecisionResult {
     let trabajo = req.mode == crate::api::vocab::Mode::WORK;
     let necesita_obras = s.has_file_path && s.has_action_verb;
+    // Fuera de ahí se queda en N1 también en `chat`: era un `else if trabajo` con
+    // el mismo cuerpo que el `else`, o sea una rama que no decidía nada.
     let level = if trabajo && (necesita_obras || s.risk_hint == Risk::High) {
         Level::N2
-    } else if trabajo {
-        Level::N1
     } else {
         Level::N1
     };

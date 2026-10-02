@@ -124,4 +124,26 @@ mod tests {
         assert_eq!(d.level, Level::N3);
         assert_eq!(d.risk, Risk::Medium);
     }
+
+    /// §1 habla de tres tramos (≥0,85 · 0,55–0,85 · <0,55). Con la puntuación que
+    /// sale de `brain-rules.json` —`prioridad × 100 + condiciones`— los tres son
+    /// alcanzables, y esto lo fija: si alguien cambia el escalado y la banda del
+    /// medio deja de existir, se ve aquí y no en un panel.
+    #[test]
+    fn las_tres_franjas_de_confianza_son_alcanzables() {
+        // Regla solitaria: sin competidor el margen es total.
+        assert!(Confidence::margen(6001.0, 0.0).valor() >= Confidence::UMBRAL_ALTO);
+        // `riesgo-destrutivo` (60) contra `charla-corta` (1): 0,983.
+        let claro = Confidence::margen(6001.0, 101.0).valor();
+        assert!((0.85..1.0).contains(&claro), "{claro}");
+        // `archivo-con-verbo` (40) contra `git-de-lectura` (25): 0,387 → duda.
+        let dudan = Confidence::margen(4001.0, 2501.0).valor();
+        assert!(dudan < 0.55, "{dudan}");
+        // Y una pareja que cae justo en la banda del medio: 60 contra 10.
+        let media = Confidence::margen(6001.0, 1001.0).valor();
+        assert!(
+            (Confidence::UMBRAL_BAJO..Confidence::UMBRAL_ALTO).contains(&media),
+            "{media} no cae en 0,55–0,85"
+        );
+    }
 }

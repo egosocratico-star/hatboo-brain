@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn lo_que_no_cabe_queda_constado() {
         let a = armar(
-            vec![Pieza::nueva(Prioridad::Resto, "resto:gordo", &"x".repeat(4000))],
+            vec![Pieza::nueva(Prioridad::Resto, "resto:gordo", "x".repeat(4000))],
             10,
             &Estimador,
         );

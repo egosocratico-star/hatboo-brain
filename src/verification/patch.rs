@@ -129,7 +129,16 @@ pub fn parsear(texto: &str) -> Result<Vec<ArchivoParche>, String> {
 
 fn limpiar_ruta(s: &str) -> String {
     let sin = s.split_whitespace().next().unwrap_or("");
-    sin.trim_start_matches("a/").trim_start_matches("b/").to_string()
+    // Un solo prefijo y solo si algo queda detrás. `trim_start_matches` quitaba
+    // todos los que hubiera, y una ruta real como «a/a/utils.rs» llegaba como
+    // «utils.rs»: el parche se comprobaba contra otro archivo.
+    if let Some(rest) = sin.strip_prefix("a/") {
+        rest.to_string()
+    } else if let Some(rest) = sin.strip_prefix("b/") {
+        rest.to_string()
+    } else {
+        sin.to_string()
+    }
 }
 
 fn cabecera(l: &str) -> Result<(usize, usize, usize, usize), String> {
@@ -162,6 +171,14 @@ pub fn aplicar(original: &str, hunks: &[Hunk]) -> Result<String, String> {
     let mut cursor = 0usize; // índice 0 en `lineas`
     for h in hunks {
         let inicio = h.old_start.saturating_sub(1);
+        // Fuera de orden el corte `lineas[cursor..inicio]` iba al revés y el
+        // proceso panica en vez de decir que el parche está mal.
+        if inicio < cursor {
+            return Err(format!(
+                "los hunks no vienen en orden ascendente: uno empieza en la línea {} y el anterior ya llegó a la {cursor}",
+                h.old_start
+            ));
+        }
         if inicio > lineas.len() {
             return Err(format!(
                 "el hunk no cuadra: empieza en la línea {} y el archivo tiene {}",
@@ -171,10 +188,31 @@ pub fn aplicar(original: &str, hunks: &[Hunk]) -> Result<String, String> {
         }
         salida.extend(lineas[cursor..inicio].iter().map(|s| s.to_string()));
         cursor = inicio;
+        // Las líneas que se leen del original (contexto y borrados) tienen que
+        // ser las que el hunk declara: si no, un hunk puede irse más allá del
+        // final del archivo sin que nadie se entere.
+        let del_original = h
+            .lineas
+            .iter()
+            .filter(|l| !matches!(l, LineaHunk::Sube(_)))
+            .count();
+        if h.old_len > 0 && del_original != h.old_len {
+            return Err(format!(
+                "la cabecera declara {} líneas del original y el hunk toca {del_original}",
+                h.old_len
+            ));
+        }
         for l in &h.lineas {
             match l {
                 LineaHunk::Contexto(t) => {
-                    let real = lineas.get(cursor).copied().unwrap_or("");
+                    if cursor >= lineas.len() {
+                        return Err(format!(
+                            "el hunk pide contexto en la línea {} y el archivo termina en la {}",
+                            cursor + 1,
+                            lineas.len()
+                        ));
+                    }
+                    let real = lineas[cursor];
                     if real != t.as_str() {
                         return Err(format!(
                             "contexto no cuadra en la línea {}: esperado {t:?}, había {real:?}",
@@ -185,7 +223,14 @@ pub fn aplicar(original: &str, hunks: &[Hunk]) -> Result<String, String> {
                     cursor += 1;
                 }
                 LineaHunk::Baja(t) => {
-                    let real = lineas.get(cursor).copied().unwrap_or("");
+                    if cursor >= lineas.len() {
+                        return Err(format!(
+                            "el hunk borra la línea {} y el archivo termina en la {}",
+                            cursor + 1,
+                            lineas.len()
+                        ));
+                    }
+                    let real = lineas[cursor];
                     if real != t.as_str() {
                         return Err(format!(
                             "el borrado no cuadra en la línea {}: esperado {t:?}, había {real:?}",

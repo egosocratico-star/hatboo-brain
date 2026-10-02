@@ -128,7 +128,11 @@ async fn los_prompts_de_referencia_no_mueven_su_decision() {
                 riesgo: Risk::Low,
                 tools: vec![],
                 modelo: "nano:0.8b".into(),
-                skip_generativo: true,
+                // `false` desde el arreglo del saludo vacío: el Fast Path decide
+                // la forma (N0, sin tools, texto corto) pero no trae la respuesta,
+                // y quien no trae qué decir no puede saltarse el modelo. La
+                // aritmética de abajo sí lo salta, porque sí trae el número.
+                skip_generativo: false,
             },
         ),
         (

@@ -213,21 +213,17 @@ pub enum ApprovalLevel {
     FullAccess,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionPolicy {
     /// Air-gap: ni una petición sale del equipo aunque no haya modelo local.
     LocalOnly,
+    /// El default: primero lo que ya está en la máquina, y la nube solo si no cabe.
+    #[default]
     LocalPreferred,
     Balanced,
     CloudAllowed,
     CloudOnly,
-}
-
-impl Default for ExecutionPolicy {
-    fn default() -> Self {
-        ExecutionPolicy::LocalPreferred
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,6 +313,13 @@ pub struct Signals {
     pub has_action_verb: bool,
     pub mentions_git: bool,
     pub mentions_web: bool,
+    /// Pide algo que está dentro del proyecto («¿en qué archivo…?», «lista los
+    /// archivos»). Sin esta señal no hay regla que ofrezca `list_dir` ni
+    /// `search_files`, y esas tools eran inalcanzables.
+    pub mentions_project_files: bool,
+    /// Pide correr algo («ejecuta cargo check», «run the tests»). Lo mismo: sin
+    /// señal no había regla que llegara a `run_command`.
+    pub mentions_command: bool,
     pub risk_hint: Risk,
     pub session_failure: Option<FailureClass>,
     pub project_has_tests: bool,
@@ -340,6 +343,8 @@ impl Signals {
             "has_action_verb" => serde_json::json!(self.has_action_verb),
             "mentions_git" => serde_json::json!(self.mentions_git),
             "mentions_web" => serde_json::json!(self.mentions_web),
+            "mentions_project_files" => serde_json::json!(self.mentions_project_files),
+            "mentions_command" => serde_json::json!(self.mentions_command),
             "risk_hint" => serde_json::to_value(self.risk_hint).ok()?,
             "session_failure" => serde_json::to_value(self.session_failure).ok()?,
             "project_has_tests" => serde_json::json!(self.project_has_tests),

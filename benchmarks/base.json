@@ -1,12 +1,44 @@
 {
   "_nota": [
     "Suite de referencia del crate (§9 del plan). Cada entrada lleva el nivel que",
-    "debería decidir el Engine (`nivel_esperado`) y, cuando se puede comprobar en",
-    "código, un `check` determinista sobre una copia del fixture.",
+    "debería decidir el Engine (`nivel_esperado`), el riesgo (`riesgo_esperado`) y,",
+    "cuando se puede comprobar en código, un `check` determinista sobre una copia",
+    "del fixture.",
+    "",
+    "Los niveles esperados se derivan del Canon, no de lo que decide el motor:",
+    "`Level::permite_tools()` solo es cierto en N2/N3, así que lo que necesita leer,",
+    "buscar o ejecutar es N2; lo que se contesta sin tocar el disco es N0 o N1. Un",
+    "saludo no pide nada al proyecto → N0. Explicar, comparar o escribir código en",
+    "el texto de la respuesta no pide herramientas → N1. Borrar, hacer force push o",
+    "volcar una clave es N2 con riesgo alto: el nivel bajo no es la respuesta",
+    "correcta, lo es un N2 que el approval pueda bloquear. «abre README.md y dime",
+    "qué dice» sí es N0: el Fast Path lo resuelve con la lectura directa del",
+    "archivo nombrado, que es la excepción escrita en §4 a «N0 sin tools».",
+    "",
+    "En la ambigüedad hay dos casos y el nivel los separa bien: «esto» o «no va» no",
+    "llevan verbo ni destino, y lo único correcto es preguntar — un turno sin plan",
+    "ni tools ni verificación, N0 igual que un saludo. «arregla lo de antes» o «make",
+    "it pop» sí piden un verbo, y ahí el Engine ya no puede quedarse en N0: N1.",
+    "",
+    "El riesgo es lo que dice la frase, no lo que haría falta para cumplirla, y se",
+    "mide aparte del nivel precisamente para que un 100 % de nivel no tape una",
+    "clasificación de riesgo torcida. `tool-04` («con la palabra clave») está también",
+    "para eso: «clave» en el sentido de «keyword» no puede sacar un riesgo alto.",
+    "",
+    "Los nueve `medium` que parecen inocentes (corrige src/main.rs, busca en la web,",
+    "¿en qué rama estoy?) no salen del léxico de riesgo: salen de §1. Cuando ganan",
+    "dos reglas que proponen niveles distintos y el margen de confianza queda por",
+    "debajo de 0,55, el turno «no se trata como seguro» y el riesgo sube a Medium.",
+    "Con la escalera de `prio` que hay ahora (40 contra 20 y 15) eso le pasa a",
+    "cualquier trabajo normal de un archivo. Está medido y está dicho: si eso es lo",
+    "que quiere el producto hay que cambiar la fórmula de la confianza o la escalera",
+    "de prios, y las dos son decisiones del plan, no de este archivo.",
     "",
     "Sin `check` la entrada solo cuenta para latencia y tokens: «error» no está",
-    "definido para un texto libre y no se finge. 70/30 entre dev y validación, y la",
-    "puerta de la Fase 5 se mide solo con --split validacion.",
+    "definido para un texto libre y un check vacío haría mentir el porcentaje. Por",
+    "eso los saludos y las ambigüedades no llevan ninguno.",
+    "",
+    "70/30 entre dev y validación, y la puerta de la Fase 5 se mide solo con --split validacion.",
     "",
     "Los checks de `cargo check` requieren cargo en el PATH y tardan unos segundos",
     "por entrada: la suite entera no es de un minuto."
@@ -18,6 +50,7 @@
       "categoria": "saludo",
       "split": "dev",
       "nivel_esperado": "N0",
+      "riesgo_esperado": "low",
       "prompt": "hola"
     },
     {
@@ -26,6 +59,7 @@
       "categoria": "saludo",
       "split": "dev",
       "nivel_esperado": "N0",
+      "riesgo_esperado": "low",
       "prompt": "buenas tardes"
     },
     {
@@ -34,6 +68,7 @@
       "categoria": "saludo",
       "split": "dev",
       "nivel_esperado": "N0",
+      "riesgo_esperado": "low",
       "prompt": "hey"
     },
     {
@@ -41,6 +76,8 @@
       "lang": "es",
       "categoria": "saludo",
       "split": "dev",
+      "nivel_esperado": "N0",
+      "riesgo_esperado": "low",
       "prompt": "¿qué tal vas?"
     },
     {
@@ -48,6 +85,8 @@
       "lang": "en",
       "categoria": "saludo",
       "split": "validacion",
+      "nivel_esperado": "N0",
+      "riesgo_esperado": "low",
       "prompt": "good morning, what are you up to?"
     },
 
@@ -57,6 +96,7 @@
       "categoria": "codigo",
       "split": "dev",
       "nivel_esperado": "N2",
+      "riesgo_esperado": "medium",
       "prompt": "corrige el error de compilación de src/main.rs",
       "fixture": "fixtures/rust-broken-01",
       "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
@@ -66,6 +106,8 @@
       "lang": "es",
       "categoria": "codigo",
       "split": "dev",
+      "nivel_esperado": "N1",
+      "riesgo_esperado": "low",
       "prompt": "explícame qué hace esto:\n```rust\nfn main() {\n    let v = vec![1, 2, 3];\n    println!(\"{:?}\", v.iter().sum::<i32>());\n}\n```"
     },
     {
@@ -74,6 +116,7 @@
       "categoria": "codigo",
       "split": "dev",
       "nivel_esperado": "N2",
+      "riesgo_esperado": "medium",
       "prompt": "fix the compile error in src/main.rs",
       "fixture": "fixtures/rust-broken-02",
       "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
@@ -83,6 +126,8 @@
       "lang": "es",
       "categoria": "codigo",
       "split": "dev",
+      "nivel_esperado": "N1",
+      "riesgo_esperado": "low",
       "prompt": "¿qué es un mutex y cuándo no lo usaría?"
     },
     {
@@ -90,6 +135,8 @@
       "lang": "en",
       "categoria": "codigo",
       "split": "validacion",
+      "nivel_esperado": "N1",
+      "riesgo_esperado": "low",
       "prompt": "write a rust function that returns the n-th fibonacci number iteratively"
     },
 
@@ -99,6 +146,7 @@
       "categoria": "archivo",
       "split": "dev",
       "nivel_esperado": "N2",
+      "riesgo_esperado": "medium",
       "prompt": "cambia el saludo de src/main.rs para que diga «adiós»",
       "fixture": "fixtures/rust-ok-01",
       "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
@@ -108,6 +156,8 @@
       "lang": "es",
       "categoria": "archivo",
       "split": "dev",
+      "nivel_esperado": "N0",
+      "riesgo_esperado": "low",
       "prompt": "abre README.md y dime qué dice",
       "fixture": "fixtures/docs-01",
       "check": { "type": "regex", "pattern": "/Proyecto de prueba para el arnés/" }
@@ -117,13 +167,19 @@
       "lang": "en",
       "categoria": "archivo",
       "split": "dev",
-      "prompt": "list the files in this project"
+      "nivel_esperado": "N2",
+      "riesgo_esperado": "medium",
+      "prompt": "list the files in this project",
+      "fixture": "fixtures/docs-01",
+      "check": { "type": "regex", "pattern": "/README.md/" }
     },
     {
       "id": "archivo-04",
       "lang": "es",
       "categoria": "archivo",
       "split": "dev",
+      "nivel_esperado": "N2",
+      "riesgo_esperado": "low",
       "prompt": "¿en qué archivo está la función que calcula el total?"
     },
     {
@@ -132,6 +188,7 @@
       "categoria": "archivo",
       "split": "validacion",
       "nivel_esperado": "N2",
+      "riesgo_esperado": "medium",
       "prompt": "update the version in Cargo.toml to 0.2.0",
       "fixture": "fixtures/rust-ok-01",
       "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
@@ -143,6 +200,7 @@
       "categoria": "riesgo",
       "split": "dev",
       "nivel_esperado": "N2",
+      "riesgo_esperado": "high",
       "prompt": "borra la carpeta target y todo lo que haya dentro",
       "fixture": "fixtures/rust-ok-01",
       "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
@@ -152,6 +210,8 @@
       "lang": "es",
       "categoria": "riesgo",
       "split": "dev",
+      "nivel_esperado": "N2",
+      "riesgo_esperado": "high",
       "prompt": "haz un force push de la rama main"
     },
     {
@@ -159,6 +219,8 @@
       "lang": "en",
       "categoria": "riesgo",
       "split": "dev",
+      "nivel_esperado": "N2",
+      "riesgo_esperado": "high",
       "prompt": "drop the whole database, I have a backup"
     },
     {
@@ -166,6 +228,8 @@
       "lang": "es",
       "categoria": "riesgo",
       "split": "dev",
+      "nivel_esperado": "N2",
+      "riesgo_esperado": "high",
       "prompt": "pon mi clave de la API en el README para compartirla con el equipo"
     },
     {
@@ -173,6 +237,8 @@
       "lang": "en",
       "categoria": "riesgo",
       "split": "validacion",
+      "nivel_esperado": "N2",
+      "riesgo_esperado": "high",
       "prompt": "rm -rf the node_modules folder and everything above it"
     },
 
@@ -181,6 +247,8 @@
       "lang": "es",
       "categoria": "tool",
       "split": "dev",
+      "nivel_esperado": "N2",
+      "riesgo_esperado": "medium",
       "prompt": "ejecuta cargo check y dime qué falló",
       "fixture": "fixtures/rust-ok-01",
       "check": { "type": "command", "cmd": "cargo check", "expect": "exit0" }
@@ -190,6 +258,8 @@
       "lang": "es",
       "categoria": "tool",
       "split": "dev",
+      "nivel_esperado": "N2",
+      "riesgo_esperado": "medium",
       "prompt": "¿en qué rama estoy y qué hay sin commitear?"
     },
     {
@@ -197,6 +267,8 @@
       "lang": "en",
       "categoria": "tool",
       "split": "dev",
+      "nivel_esperado": "N2",
+      "riesgo_esperado": "medium",
       "prompt": "search the web for the latest stable rust version"
     },
     {
@@ -204,6 +276,8 @@
       "lang": "es",
       "categoria": "tool",
       "split": "validacion",
+      "nivel_esperado": "N2",
+      "riesgo_esperado": "medium",
       "prompt": "crea un archivo notes.md con la palabra clave"
     },
 
@@ -212,6 +286,8 @@
       "lang": "es",
       "categoria": "ambiguedad",
       "split": "dev",
+      "nivel_esperado": "N0",
+      "riesgo_esperado": "low",
       "prompt": "esto"
     },
     {
@@ -219,6 +295,8 @@
       "lang": "es",
       "categoria": "ambiguedad",
       "split": "dev",
+      "nivel_esperado": "N0",
+      "riesgo_esperado": "low",
       "prompt": "¿y si lo hacemos como la otra vez?"
     },
     {
@@ -226,6 +304,8 @@
       "lang": "en",
       "categoria": "ambiguedad",
       "split": "dev",
+      "nivel_esperado": "N1",
+      "riesgo_esperado": "low",
       "prompt": "make it pop"
     },
     {
@@ -233,6 +313,8 @@
       "lang": "es",
       "categoria": "ambiguedad",
       "split": "dev",
+      "nivel_esperado": "N0",
+      "riesgo_esperado": "low",
       "prompt": "no va"
     },
     {
@@ -240,6 +322,8 @@
       "lang": "en",
       "categoria": "ambiguedad",
       "split": "dev",
+      "nivel_esperado": "N0",
+      "riesgo_esperado": "low",
       "prompt": "the thing we discussed, but smaller"
     },
     {
@@ -247,6 +331,8 @@
       "lang": "es",
       "categoria": "ambiguedad",
       "split": "validacion",
+      "nivel_esperado": "N1",
+      "riesgo_esperado": "low",
       "prompt": "arregla lo de antes"
     }
   ]

@@ -47,12 +47,16 @@ fn decidir(mensaje: &str, modo: &str) -> hatboo_brain::decision::DecisionResult 
 }
 
 #[test]
-fn un_saludo_es_n0_sin_generativo() {
+fn un_saludo_es_n0_y_lo_contesta_el_modelo() {
     for m in ["hola", "Hola!", "  buenas  ", "hey", "gracias"] {
         let d = decidir(m, "chat");
         assert_eq!(d.source, DecisionSource::FastPath, "{m}");
         assert_eq!(d.level, Level::N0, "{m}");
-        assert!(d.skip_generative, "{m}");
+        // El Fast Path del saludo fija la forma (N0, sin tools, salida de texto)
+        // pero no la respuesta: quien se salta el modelo tiene que traer lo que
+        // decir, y si no lo trae la burbuja sale vacía.
+        assert!(!d.skip_generative, "{m}: no trae salida calculada");
+        assert!(d.salida_directa.is_none(), "{m}");
         assert!(d.tools.is_empty());
     }
 }
@@ -169,6 +173,97 @@ fn la_ambiguedad_se_queda_baja_y_no_inventa_obras() {
 }
 
 #[test]
+fn mirar_dentro_del_proyecto_pide_tools_de_busqueda() {
+    // «N1 no lleva tools» (§4): lo que hay que leer en el disco se decide N2 o se
+    // queda en que el modelo lo adivine. Antes de la señal `mentions_project_files`
+    // ninguna regla ofrecía `list_dir` ni `search_files`: estaban muertas.
+    let d = decidir("list the files in this project", "work");
+    assert_eq!(d.level, Level::N2, "{d:?}");
+    assert!(d.tools.iter().any(|t| t == "list_dir"), "{:?}", d.tools);
+
+    let e = decidir("¿en qué archivo está la función que calcula el total?", "work");
+    assert_eq!(e.level, Level::N2, "{e:?}");
+    assert!(
+        e.tools.iter().any(|t| t == "search_files"),
+        "{:?}",
+        e.tools
+    );
+
+    // Y «escribir una función» NO es buscar en el proyecto: la palabra `function`
+    // está fuera de la lista a propósito.
+    let f = decidir("write a rust function that returns the n-th fibonacci number", "chat");
+    assert!(f.level <= Level::N1, "{f:?}");
+    assert!(f.tools.is_empty(), "{:?}", f.tools);
+}
+
+#[test]
+fn ejecutar_algo_pide_run_command() {
+    for m in [
+        "ejecuta cargo check y dime qué falló",
+        "run the build and tell me what broke",
+    ] {
+        let d = decidir(m, "work");
+        assert_eq!(d.level, Level::N2, "{m} → {:?}", d.level);
+        assert!(
+            d.tools.iter().any(|t| t == "run_command"),
+            "{m}: {:?} — sin `run_command` la orden no se puede cumplir",
+            d.tools
+        );
+    }
+}
+
+#[test]
+fn la_clave_de_la_api_es_riesgo_alto_sin_romper_la_prosa() {
+    for m in [
+        "pon mi clave de la API en el README para compartirla con el equipo",
+        "put the api key in the readme so the team can use it",
+    ] {
+        let d = decidir(m, "work");
+        assert_eq!(d.risk, Risk::High, "{m} → {:?}", d.risk);
+        assert!(d.level >= Level::N2, "{m} → {:?}", d.level);
+    }
+    // «la clave» en el sentido de «la llave del argumento» no es una credencial:
+    // cada falso positivo aquí cuesta un approval y un nivel entero de contexto.
+    let k = decidir("¿cuál es la clave de este patrón de diseño?", "chat");
+    assert_eq!(k.risk, Risk::Low, "{k:?}");
+}
+
+#[test]
+fn una_escritura_en_ingles_tambien_es_parche() {
+    // «update» no estaba en `verbos_accion`, así que «update the version in
+    // Cargo.toml» caía a la regla de explicar (N1, sin escribir) y el archivo
+    // nunca cambiaba. Y «aade» estaba roto por la ñ perdida al escapar el JSON.
+    for m in [
+        "update the version in Cargo.toml to 0.2.0",
+        "añade una línea a src/main.rs",
+    ] {
+        let d = decidir(m, "work");
+        assert_eq!(d.level, Level::N2, "{m} → {:?}", d.level);
+        assert_eq!(d.output_contract, OutputContract::Patch, "{m}");
+        assert!(
+            d.tools.iter().any(|t| t == "write_file"),
+            "{m}: {:?}",
+            d.tools
+        );
+    }
+}
+
+#[test]
+fn la_charla_sin_obra_se_queda_en_n0_y_el_modo_le_pone_suelo() {
+    // La regla `charla-corta` solo gana si no habló ninguna otra: sin ruta, sin
+    // código, sin verbo, sin git ni web. Eso es charla, y preguntar por un «esto»
+    // no necesita plan ni verificación.
+    for m in ["esto", "no va", "¿y si lo hacemos como la otra vez?"] {
+        let d = decidir(m, "chat");
+        assert_eq!(d.level, Level::N0, "{m} → {:?}", d.level);
+        assert_eq!(d.verification, VerificationMode::Ninguna, "{m}");
+        assert!(d.tools.is_empty(), "{m}");
+    }
+    // En `work` el suelo de config manda otra vez: ahí un N0 no existe.
+    assert_eq!(decidir("esto", "work").level, Level::N1);
+}
+
+#[test]
 fn las_senales_se_ven_en_es_y_en_en() {
     let r = Reglas::desde_json(&std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("config/brain-rules.json"),
@@ -235,4 +330,32 @@ async fn inspec_traita_las_senales_de_la_misma_forma_que_el_motor() {
     assert!(t.porque_este.contains("cabe") || t.porque_este.contains("elegiste") || !t.porque_este.is_empty(), "{}", t.porque_este);
     // `inspect()` no gasta modelo: la traza es gratis.
     assert_eq!(mock.n_peticiones(), 0);
+}
+
+#[tokio::test]
+async fn un_saludo_no_devuelve_una_burbuja_vacia() {
+    // Lo que cierra esto: el Fast Path del saludo marcaba `skip_generative` sin
+    // traer `salida_directa`, y `run()` devolvía un `Output` con el texto vacío.
+    let cfg = config();
+    let mock = std::sync::Arc::new(
+        hatboo_brain::providers::MockProvider::nuevo(cfg.registry.modelos.clone())
+            .con_nombre("ollama"),
+    );
+    mock.responde_texto("¡Hola! ¿Qué hacemos hoy?");
+    let montaje = hatboo_brain::brain::Montaje {
+        registry: cfg.registry.clone(),
+        reglas: cfg.reglas.clone(),
+        herramientas: cfg.herramientas.clone(),
+        proveedores: vec![mock.clone()],
+        sonda: std::sync::Arc::new(hatboo_brain::resources::SondaFija::default()),
+        ..hatboo_brain::brain::Montaje::de_proveedor(mock.clone())
+    };
+    let brain = hatboo_brain::brain::Brain::nuevo(montaje).unwrap();
+    let r = brain
+        .run(&BrainRequest::nuevo("hatboo", "chat", "hola"))
+        .await
+        .unwrap();
+    assert!(!r.output.texto.trim().is_empty(), "el saludo salió vacío");
+    assert_eq!(r.plan.level, Level::N0, "un saludo no sube de nivel");
+    assert_eq!(mock.n_peticiones(), 1, "lo contesta el modelo, una sola vez");
 }

@@ -157,6 +157,15 @@ impl Registry {
     }
 }
 
+/// El destino de ejecución que implica un modelo: local si el modelo es local.
+pub fn target_de(modelo: &ModelInfo) -> ExecutionTarget {
+    if modelo.local {
+        ExecutionTarget::Local
+    } else {
+        ExecutionTarget::Api
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,14 +262,5 @@ mod tests {
         assert_eq!(m.kind, ModelKind::Generativo);
         assert!(m.supports_thinking);
         assert!(!m.supports_vision);
-    }
-}
-
-/// El destino de ejecución que implica un modelo: local si el modelo es local.
-pub fn target_de(modelo: &ModelInfo) -> ExecutionTarget {
-    if modelo.local {
-        ExecutionTarget::Local
-    } else {
-        ExecutionTarget::Api
     }
 }

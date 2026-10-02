@@ -22,8 +22,9 @@ pub enum BrainError {
     /// Ningún modelo cumple tools / contexto / RAM / policy.
     #[error("ningún modelo cumple lo que pide este pedido")]
     NoEligibleModel,
-    /// El Governor dijo «no cabe» con cifras en la mano.
-    #[error("no hay sitio: hacen falta {needed_mb} MB libres y quedan {free_mb}")]
+    /// El Governor dijo «no cabe» con cifras en la mano. `needed_mb` incluye el
+    /// margen que hay que dejar libre, no solo lo que pesa el modelo.
+    #[error("no hay sitio: hacen falta {needed_mb} MB libres (modelo + margen) y quedan {free_mb}")]
     ResourceExhausted { needed_mb: u32, free_mb: u32 },
     #[error("proveedor: {0}")]
     Provider(ProviderError),
@@ -45,9 +46,9 @@ impl BrainError {
             BrainError::NoEligibleModel => {
                 "ningún modelo disponible cumple lo que pide este pedido".into()
             }
-            BrainError::ResourceExhausted { needed_mb, free_mb } => format!(
-                "no hay sitio: hacen falta {needed_mb} MB libres y quedan {free_mb}"
-            ),
+            // La misma frase que da `Display`: duplicarla aquí es tener dos
+            // mensajes que se separan en cuanto alguien cambia uno.
+            BrainError::ResourceExhausted { .. } => self.to_string(),
             BrainError::Provider(e) => match e {
                 ProviderError::ModeloNoInstalado(m) => {
                     format!("el modelo «{m}» no está instalado")
