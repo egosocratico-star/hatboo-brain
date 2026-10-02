@@ -1273,7 +1273,7 @@ fn bateria_decisiones(entradas: &[&Entrada], config: &Cargada, opts: &Opciones) 
         out_total += hatboo_brain::planner::plan::default_max_output(d.level);
     }
     println!(
-        "asignado por el Engine: {} de contexto y {} de salida en total (media {} / {} por turno)",
+        "presupuesto del nivel (antes de medir la carga real): {} de contexto y {} de salida en total (media {} / {} por turno)",
         ctx_total,
         out_total,
         ctx_total / entradas.len().max(1) as u32,

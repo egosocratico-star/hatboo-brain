@@ -65,16 +65,10 @@ pub fn piezas_del_pedido(
         }
     }
 
-    // Historial de esta sesión, recortado por tamaño antes de presupuestar.
-    for (i, m) in req.history.iter().rev().take(6).rev().enumerate() {
-        let papel = if m.role == "user" { "Usuario" } else { "Hatboo" };
-        v.push(Pieza::nueva(
-            Prioridad::Historial,
-            format!("historial:{i}"),
-            format!("{papel}: {}", truncar(&m.content, 700)),
-        ));
-    }
-
+    // El historial NO va aquí. Viaja por el canal nativo de `messages` del
+    // proveedor, recortado a `plan.historial_turnos` (lo que cabe según §11).
+    // Meterlo además en el texto del turno era mandarlo dos veces: una recortada a
+    // 700 caracteres y otra entera y sin presupuestar.
     v
 }
 
@@ -109,15 +103,6 @@ fn si_no(b: bool) -> &'static str {
     } else {
         "no"
     }
-}
-
-fn truncar(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        return s.to_string();
-    }
-    let mut t: String = s.chars().take(n).collect();
-    t.push_str(" […]");
-    t
 }
 
 #[cfg(test)]
@@ -166,15 +151,20 @@ mod tests {
     }
 
     #[test]
-    fn el_historial_se_recorta() {
+    fn el_historial_no_se_duplica_en_el_texto_del_turno() {
+        // Viaja por el canal nativo de `messages` del proveedor, recortado a lo que
+        // el Plan admitió por presupuesto. Meterlo además aquí era mandarlo dos
+        // veces: una recortada y otra entera y sin contar.
         let largo = "k".repeat(4000);
         let req = BrainRequest {
             history: vec![crate::api::request::Message::usuario(&largo)],
             ..BrainRequest::nuevo("hatboo", Mode::CHAT, "sigue")
         };
         let p = piezas_del_pedido(&req, None, None);
-        let h = p.iter().find(|x| x.origen.starts_with("historial:")).unwrap();
-        assert!(h.texto.chars().count() < 800, "{}", h.texto.len());
-        assert!(h.texto.ends_with("[…]"));
+        assert!(
+            !p.iter().any(|x| x.origen.starts_with("historial:")),
+            "{:?}",
+            p.iter().map(|x| &x.origen).collect::<Vec<_>>()
+        );
     }
 }

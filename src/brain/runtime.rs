@@ -620,7 +620,17 @@ impl Brain {
         let tools_del_producto = req.tools.ids();
         // El system se mide antes de firmar: la invariante de presupuesto lo pide.
         let system = self.system_de(req, &decision.tools);
-        let system_tokens = self.contador.cuenta(&system);
+        // La carga del turno: lo que el usuario escribió ahora y lo que valen sus
+        // turnos anteriores, por separado y en el orden del historial. Sin esto el
+        // Plan firmaba «cabe» contando solo el system y el presupuesto del nivel.
+        let carga = crate::planner::Carga {
+            mensaje_tokens: self.contador.cuenta(&req.message),
+            historial: req
+                .history
+                .iter()
+                .map(|m| self.contador.cuenta(&m.content))
+                .collect(),
+        };
         let ctx = PlanContext {
             approval: req.approval_level,
             policy: req.policies,
@@ -630,12 +640,16 @@ impl Brain {
             ctx_permitidos: &self.config.governor.ctx_permitidos,
         };
         let pie = Armador::armar(
-            req,
-            decision,
-            &eleccion.modelo,
-            &eleccion.consejo,
-            system_tokens,
-            &ctx,
+            crate::planner::Entrada {
+                req,
+                decision,
+                modelo: &eleccion.modelo,
+                consejo: &eleccion.consejo,
+                system: &system,
+                carga: &carga,
+                ctx: &ctx,
+            },
+            self.contador.as_ref(),
         );
         Ok((pie, eleccion.porque))
     }
@@ -704,11 +718,16 @@ impl Brain {
         let proveedor = self
             .proveedor(&plan.provider)
             .ok_or(BrainError::NoEligibleModel)?;
+        // El historial que el Plan admitió, y solo ese: son los turnos más
+        // recientes, contados desde el final. Mandar `req.history` entero era
+        // saltarse el presupuesto de §11 por la puerta de atrás.
+        let n = usize::from(plan.historial_turnos).min(req.history.len());
+        let historial = req.history[req.history.len() - n..].to_vec();
         let g = GenerationRequest {
             model: plan.model.clone(),
             system: p.system.clone(),
             prompt: p.turno.clone(),
-            history: req.history.clone(),
+            history: historial,
             tools: self.schemas_de(&plan.tools),
             num_ctx: plan.num_ctx,
             keep_alive: plan.keep_alive,

@@ -38,7 +38,7 @@ impl PlanViolation {
                 format!("el proveedor «{p}» no lo permite la política")
             }
             PlanViolation::BudgetExceedsCtx => {
-                "system + contexto + salida no caben en num_ctx".into()
+                "system + turno + historial + contexto + salida no caben en num_ctx".into()
             }
             PlanViolation::ThinkingAboveCeiling => {
                 "el techo de razonamiento del producto se superó".into()

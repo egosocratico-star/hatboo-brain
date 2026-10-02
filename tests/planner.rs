@@ -311,3 +311,80 @@ fn un_registry_que_no_cuadra_con_el_proveedor_no_se_firma() {
         "{e:?}"
     );
 }
+
+/// El plan promete una ventana; la petición tiene que ser **esa** ventana. Antes el
+/// Brain mandaba `req.history` entero al proveedor y además lo metía recortado dentro
+/// del texto del turno: dos copias del mismo historial, y la que no entraba en
+/// ninguna cuenta era la que desbordaba el `num_ctx` firmado.
+#[tokio::test]
+async fn lo_que_el_plan_admitio_es_lo_que_llega_al_proveedor() {
+    let modelos = vec![modelo("gemma3:1b", false)];
+    let mock = std::sync::Arc::new(
+        hatboo_brain::providers::MockProvider::nuevo(modelos.clone()).con_nombre("ollama"),
+    );
+    for _ in 0..3 {
+        mock.responde_texto("vale");
+    }
+    let reglas = hatboo_brain::decision::rules::Reglas::desde_json(
+        r#"{"version":1,"reglas":[{"id":"corto-a-n1",
+             "cuando":[{"senal":"message_length","op":"<=","valor":60}],
+             "entonces":{"intent":"ask","level":"N1","contrato":"texto"}}]}"#,
+    )
+    .unwrap();
+    let montaje = hatboo_brain::brain::Montaje {
+        proveedores: vec![mock.clone()],
+        registry: Registry::nuevo(modelos.clone()),
+        reglas,
+        sonda: std::sync::Arc::new(hatboo_brain::resources::SondaFija::default()),
+        ..hatboo_brain::brain::Montaje::de_proveedor(mock.clone())
+    };
+    let brain = hatboo_brain::brain::Brain::nuevo(montaje).unwrap();
+
+    let mut req = BrainRequest::nuevo("hatboo", "chat", "¿y ahora qué?");
+    req.history = (0..12)
+        .map(|i| {
+            hatboo_brain::api::request::Message::usuario(format!("turno {i}: {}", "k".repeat(1200)))
+        })
+        .collect();
+
+    let plan = brain.plan(&req).await.unwrap();
+    assert!(
+        plan.mensaje_tokens > 0,
+        "el turno del usuario tiene que entrar en la cuenta: {plan:?}"
+    );
+    assert!(plan.historial_turnos > 0, "algo de historial cabe: {plan:?}");
+    assert!(
+        usize::from(plan.historial_turnos) < req.history.len(),
+        "pero no los doce: {:?}",
+        plan.historial_turnos
+    );
+    assert!(
+        plan.presupuesto_tokens() <= plan.num_ctx,
+        "{:?} > {}",
+        plan.presupuesto_tokens(),
+        plan.num_ctx
+    );
+    assert!(
+        plan.reason.contains("historial recortado"),
+        "lo que se quedó fuera se dice: {}",
+        plan.reason
+    );
+
+    brain.run(&req).await.ok();
+    let peticion = mock.ultima_peticion().expect("hubo una petición");
+    assert_eq!(
+        peticion.history.len(),
+        usize::from(plan.historial_turnos),
+        "al proveedor llegan justo los turnos que el plan admitió"
+    );
+    let esperados = req.history[req.history.len() - usize::from(plan.historial_turnos)..].to_vec();
+    assert_eq!(
+        peticion.history, esperados,
+        "llegan los más recientes, en el mismo orden"
+    );
+    assert!(
+        !peticion.prompt.contains("kkkk"),
+        "el historial no se cuela también en el texto del turno: {}",
+        peticion.prompt
+    );
+}

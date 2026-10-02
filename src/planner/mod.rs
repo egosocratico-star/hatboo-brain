@@ -7,6 +7,6 @@ pub mod validation;
 /// nombre dos veces, y lo que hay dentro es el armador, no otro planner.
 mod armador;
 
-pub use armador::{Armador, Pie};
+pub use armador::{Armador, Carga, Entrada, Pie};
 pub use plan::{SCHEMA_VERSION, Plan};
 pub use validation::{PlanContext, PlanViolation, validate_plan, verificacion_sugerida};

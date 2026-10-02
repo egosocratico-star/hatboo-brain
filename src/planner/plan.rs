@@ -10,7 +10,7 @@ use crate::api::vocab::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// El plan firmado. `plan_hash` va fuera del hash: se calcula sobre el resto.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,6 +52,20 @@ pub struct Plan {
     /// invariante de presupuesto junto con `context_budget_tokens`.
     #[serde(default)]
     pub system_tokens: u32,
+    /// El mensaje de este turno, medido con el contador del producto. §11 habla de
+    /// `system + contexto + salida ≤ num_ctx`, y el turno del usuario es contexto:
+    /// mientras no se contó, un plan firmado como «cabe» podía mandar 1.500 tokens
+    /// que nadie presupuestó.
+    #[serde(default)]
+    pub mensaje_tokens: u32,
+    /// Los turnos de historial que caben dentro del presupuesto, contados desde el
+    /// más reciente hacia atrás, y lo que valen. Es lo que el Brain manda al
+    /// proveedor por el canal nativo de `messages`: el resto del historial se queda
+    /// en el producto.
+    #[serde(default)]
+    pub historial_turnos: u8,
+    #[serde(default)]
+    pub historial_tokens: u32,
     /// El riesgo con el que se firmó. `risk` vive en la decisión, pero el
     /// Executor lo necesita para el Tool Gate.
     #[serde(default)]
@@ -99,14 +113,20 @@ impl Plan {
             plan_hash: None,
             parent_plan_hash: None,
             system_tokens: 0,
+            mensaje_tokens: 0,
+            historial_turnos: 0,
+            historial_tokens: 0,
             risk: Risk::Low,
         }
     }
 
-    /// La invariante de §11 del Canon: `system + contexto + salida ≤ num_ctx`,
-    /// contando el razonamiento como salida.
+    /// La invariante de §11 del Canon: lo que va al modelo (system, el turno, el
+    /// historial admitido, el presupuesto de contexto y la salida, contando el
+    /// razonamiento como salida) no puede pasar de `num_ctx`.
     pub fn presupuesto_tokens(&self) -> u32 {
         self.system_tokens
+            + self.mensaje_tokens
+            + self.historial_tokens
             + self.context_budget_tokens
             + self.max_output_tokens
             + thinking_extra_tokens(&self.thinking)
