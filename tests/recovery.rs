@@ -258,6 +258,11 @@ async fn la_corrida_normal_emite_plan_verificacion_y_completado() {
     assert!(eventos.tiene("plan"), "{:?}", eventos.0.lock().unwrap());
     assert!(eventos.tiene("completado"));
     assert!(!eventos.tiene("escalada"), "sin causa no se escala");
+    assert!(
+        r.recuperacion.is_empty(),
+        "una corrida limpia no tiene nada que contar: {:?}",
+        r.recuperacion
+    );
     assert_eq!(r.plan.model, "nano:0.8b");
 }
 

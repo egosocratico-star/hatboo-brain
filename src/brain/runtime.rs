@@ -356,6 +356,7 @@ impl Brain {
                     reintentos,
                     recargas,
                     clase_fallo: ultima_clase,
+                    recuperacion: recuperacion.clone(),
                 }));
             }
 
@@ -545,6 +546,7 @@ impl Brain {
                     reintentos,
                     recargas,
                     clase_fallo: ultima_clase,
+                    recuperacion: recuperacion.clone(),
                 }));
             }
 
@@ -594,6 +596,7 @@ impl Brain {
                     reintentos,
                     recargas,
                     clase_fallo: ultima_clase,
+                    recuperacion: recuperacion.clone(),
                 }));
             }
 
@@ -611,6 +614,7 @@ impl Brain {
                     reintentos,
                     recargas,
                     clase_fallo: ultima_clase,
+                    recuperacion: recuperacion.clone(),
                 }));
             }
 
@@ -630,6 +634,7 @@ impl Brain {
                     reintentos,
                     recargas,
                     clase_fallo: ultima_clase,
+                    recuperacion: recuperacion.clone(),
                 }));
             }
 
@@ -698,6 +703,7 @@ impl Brain {
                         reintentos,
                         recargas,
                         clase_fallo: ultima_clase,
+                        recuperacion: recuperacion.clone(),
                     }));
                 }
             }
@@ -1125,6 +1131,7 @@ impl Brain {
             reintentos: _,
             recargas: _,
             clase_fallo: _,
+            recuperacion,
         } = c;
         let r = BrainResult {
             output: Output {
@@ -1136,6 +1143,7 @@ impl Brain {
             plan: plan.clone(),
             verification: verificacion,
             metrics,
+            recuperacion,
         };
         self.registrar(req, plan, &r);
         r
@@ -1238,6 +1246,8 @@ impl Brain {
                 duracion_ms: inicio.elapsed().as_millis() as u64,
                 ..Default::default()
             },
+            // Un Fast Path no tropezó con nada: no hubo nada que recuperar.
+            recuperacion: vec![],
         };
         // `Completado` lo emite `run_with` para cualquier `Ok`. Emitirlo también
         // aquí mandaba dos finales por un turno de aritmética, y el motivo de
@@ -1320,6 +1330,9 @@ struct Cierre<'a> {
     reintentos: u8,
     recargas: u32,
     clase_fallo: Option<FailureClass>,
+    /// El rastro acumulado hasta esta salida. Es la copia del momento: lo que siga
+    /// después de entregar ya no cabe en el resultado.
+    recuperacion: Vec<String>,
 }
 
 fn con_error(e: ProviderError) -> BrainError {

@@ -77,6 +77,12 @@ pub struct BrainResult {
     pub plan: Plan,
     pub verification: VerificationResult,
     pub metrics: TaskMetrics,
+    /// Lo que hizo falta para llegar hasta aquí: reintentos con su motivo, planes
+    /// degradados, puertas que dijeron que no, rondas agotadas. El runtime lo iba
+    /// acumulando y lo tiraba al devolver; sin él el panel no puede enseñar un
+    /// turno que se salvó por los pelos como lo que fue.
+    #[serde(default)]
+    pub recuperacion: Vec<String>,
 }
 
 impl BrainResult {

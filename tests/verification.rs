@@ -616,6 +616,16 @@ async fn una_tool_fuera_del_plan_se_le_dice_al_modelo_y_cuenta_como_fallo() {
         "{:?}",
         r.metrics
     );
+    // 4 · y el rastro de la recuperación viaja con el resultado. Antes se acumulaba
+    // dentro del bucle y se tiraba al devolver: el panel no podía contar qué costó
+    // el turno.
+    assert!(
+        r.recuperacion
+            .iter()
+            .any(|x| x.contains("no está en el Plan")),
+        "{:?}",
+        r.recuperacion
+    );
     // Y la llamada rechazada se ve en el resultado, con su motivo, no borrada.
     let rechazada = r
         .output
