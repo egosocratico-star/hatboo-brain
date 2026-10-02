@@ -124,8 +124,9 @@ fn el_presupuesto_roto_se_detecta() {
 fn thinking_por_encima_del_techo_del_producto_no_pasa() {
     let modelos = vec![modelo("gemma3:1b", true)];
     let mut p = plan_de_prueba();
-    // `medium` cabe en el presupuesto de un 4096; si se pone `high` lo que salta
-    // es la comprobación del presupuesto, que va antes, y el test diría otra cosa.
+    // El techo del producto es `low` en este contexto, así que `medium` es una
+    // violación de política: se comprueba antes que la resta de presupuesto, que
+    // con `medium` también daría pero diría el sitio equivocado.
     p.thinking = ThinkingLevel::Medium;
     let e = validate_plan(&p, &contexto(&herramientas(), &modelos)).unwrap_err();
     assert!(matches!(e, PlanViolation::ThinkingAboveCeiling), "{e:?}");

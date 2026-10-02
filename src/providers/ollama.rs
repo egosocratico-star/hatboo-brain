@@ -74,7 +74,9 @@ impl OllamaProvider {
                 "num_ctx": req.num_ctx,
                 "temperature": req.temperature,
                 "seed": req.seed,
-                "num_predict": req.max_output_tokens,
+                // Con `think: true` Ollama gasta el razonamiento dentro de
+                // `num_predict`, así que el techo es la suma que firmó el Plan.
+                "num_predict": req.tope_de_generacion(),
             }
         });
 
@@ -575,6 +577,12 @@ mod tests {
         r.thinking = ThinkingLevel::Low;
         let c = OllamaProvider::cuerpo_de(&r);
         assert_eq!(c["think"], true);
+        // `num_predict` es todo lo que genera el modelo, razonamiento incluido: con
+        // el tope del Plan a secas, pensar se pagaba recortando la respuesta.
+        assert_eq!(
+            c["options"]["num_predict"],
+            512 + ThinkingLevel::Low.presupuesto_tokens()
+        );
         r.keep_alive = KeepAlive::Expulsar;
         assert_eq!(
             OllamaProvider::cuerpo_de(&r)["keep_alive"],

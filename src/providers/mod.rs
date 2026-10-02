@@ -68,6 +68,16 @@ impl GenerationRequest {
             timeout_s: 60,
         }
     }
+
+    /// El techo que se manda al proveedor por la línea: la respuesta que firmó el
+    /// Plan **más** el razonamiento que §11 reservó para `thinking`. En las cuatro
+    /// APIs el razonamiento sale del mismo bote que la respuesta, así que mandar
+    /// solo `max_output_tokens` era quedarse con lo que sobrara: en Anthropic con
+    /// `medium` y un N2 de 1024, un token de respuesta.
+    pub fn tope_de_generacion(&self) -> u32 {
+        self.max_output_tokens
+            .saturating_add(self.thinking.presupuesto_tokens())
+    }
 }
 
 /// Lo que salió. Ningún número aquí es inventado: si el proveedor no lo declara,

@@ -63,7 +63,9 @@ impl AnthropicProvider {
         let mut cuerpo = serde_json::json!({
             "model": req.model,
             "messages": mensajes,
-            "max_tokens": req.max_output_tokens,
+            // El techo de la API cubre razonamiento + respuesta, y el Plan los
+            // presupuestó los dos: `tope_de_generacion` es esa suma.
+            "max_tokens": req.tope_de_generacion(),
             "stream": true,
             "temperature": req.temperature,
         });
@@ -71,17 +73,15 @@ impl AnthropicProvider {
             cuerpo["system"] = serde_json::Value::String(req.system.clone());
         }
         if req.thinking != ThinkingLevel::Off {
-            let presupuesto = match req.thinking {
-                ThinkingLevel::Low => 1024u32,
-                ThinkingLevel::Medium => 4096,
-                ThinkingLevel::High => 10_240,
-                ThinkingLevel::Off => 0,
-            };
-            // Nunca se pasa del tope de salida: se baja el presupuesto, no se sube
-            // el tope a escondidas.
-            let seguro = presupuesto.min(req.max_output_tokens.saturating_sub(1));
+            // La tabla es la del Plan (`ThinkingLevel::presupuesto_tokens`), no una
+            // copia aquí: mientras hubo dos, el presupuesto reservado por §11 y el
+            // que se pedía por la línea no cuadraban.
+            let presupuesto = req.thinking.presupuesto_tokens();
+            // Anthropic pide `budget_tokens < max_tokens` y al menos 1024. Con el
+            // tope de arriba se cumple el primero siempre (el presupuesto va sumado,
+            // no restado) y la tabla no baja de 1024.
             cuerpo["thinking"] = serde_json::json!({
-                "type": "enabled", "budget_tokens": seguro
+                "type": "enabled", "budget_tokens": presupuesto
             });
             // Con pensamiento activado la API no admite temperature != 1.
             cuerpo["temperature"] = serde_json::json!(1.0);
@@ -404,17 +404,34 @@ mod tests {
         r.thinking = ThinkingLevel::Medium;
         let c = AnthropicProvider::cuerpo_de(&r);
         assert_eq!(c["thinking"]["type"], "enabled");
-        assert!(c["thinking"]["budget_tokens"].as_u64().unwrap() < 512);
         assert_eq!(c["temperature"], 1.0);
+        // El presupuesto es el que reservó §11, no una cifra de otra tabla.
+        assert_eq!(
+            c["thinking"]["budget_tokens"],
+            ThinkingLevel::Medium.presupuesto_tokens()
+        );
     }
 
     #[test]
-    fn el_presupuesto_nunca_iguala_al_tope_de_salida() {
+    fn el_presupuesto_de_razonamiento_no_se_come_la_respuesta() {
+        // Antes: `max_tokens` era el tope del Plan y el presupuesto se metía DENTRO,
+        // así que un N2 (1024) con `medium` se quedaba con 1 token de respuesta. La
+        // API exige `budget_tokens < max_tokens`, y la forma honesta de cumplirla es
+        // sumar el presupuesto al tope, no restárselo a la respuesta.
         let mut r = req();
         r.thinking = ThinkingLevel::High;
         r.max_output_tokens = 200;
         let c = AnthropicProvider::cuerpo_de(&r);
-        assert_eq!(c["thinking"]["budget_tokens"], 199);
+        let presupuesto = ThinkingLevel::High.presupuesto_tokens();
+        assert_eq!(c["thinking"]["budget_tokens"], presupuesto);
+        assert_eq!(c["max_tokens"], 200 + presupuesto);
+        assert!(
+            c["thinking"]["budget_tokens"].as_u64().unwrap() < c["max_tokens"].as_u64().unwrap(),
+            "la API lo exige así"
+        );
+        // Con el razonamiento apagado el tope es exactamente lo que firmó el Plan.
+        let sin = AnthropicProvider::cuerpo_de(&req());
+        assert_eq!(sin["max_tokens"], 512);
     }
 
     #[test]

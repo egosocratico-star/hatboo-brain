@@ -201,6 +201,25 @@ pub enum ThinkingLevel {
     High,
 }
 
+impl ThinkingLevel {
+    /// Cuánto razonamiento pide este nivel al proveedor. Es **una sola tabla** para
+    /// el presupuesto de §11 y para lo que se manda por la línea: mientras vivían
+    /// en dos sitios distintos, el Plan reservaba 256 y Anthropic pedía 1024, así
+    /// que el razonamiento se comía la respuesta en vez de sumarse a ella (medido en
+    /// el cuerpo de `cuerpo_de`: un N2 con `medium` se quedaba con 1 token de
+    /// salida). Los números son las tarifas de Anthropic, que es el único proveedor
+    /// del crate con presupuesto explícito; los demás cuentan el razonamiento dentro
+    /// del tope de salida.
+    pub fn presupuesto_tokens(&self) -> u32 {
+        match self {
+            ThinkingLevel::Off => 0,
+            ThinkingLevel::Low => 1024,
+            ThinkingLevel::Medium => 4096,
+            ThinkingLevel::High => 10_240,
+        }
+    }
+}
+
 /// Los cuatro niveles de aprobación del producto. Ordenados de menos a más
 /// capacidad: el Brain interseca esto con la policy y **nunca** lo relaja.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -375,6 +394,27 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ApprovalLevel::ApproveForMe).unwrap(),
             "\"approve_for_me\""
+        );
+    }
+
+    /// La reserva de §11 y lo que el proveedor pide por la línea son **la misma**
+    /// tabla. Mientras fueron dos, el Plan apartaba 256 y Anthropic pedía 1024: el
+    /// razonamiento se comía la respuesta en silencio.
+    #[test]
+    fn el_presupuesto_de_razonamiento_vive_en_un_solo_sitio() {
+        assert_eq!(ThinkingLevel::Off.presupuesto_tokens(), 0);
+        for t in [ThinkingLevel::Low, ThinkingLevel::Medium, ThinkingLevel::High] {
+            // 1024 es el suelo que admite Anthropic; por debajo, el `budget_tokens`
+            // que se manda es un 400.
+            assert!(t.presupuesto_tokens() >= 1024, "{t:?}");
+            assert_eq!(
+                crate::planner::plan::thinking_extra_tokens(&t),
+                t.presupuesto_tokens(),
+                "{t:?}: dos tablas para la misma cifra"
+            );
+        }
+        assert!(
+            ThinkingLevel::Low.presupuesto_tokens() < ThinkingLevel::High.presupuesto_tokens()
         );
     }
 

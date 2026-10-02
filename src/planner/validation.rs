@@ -134,17 +134,10 @@ pub fn validate_plan(plan: &Plan, ctx: &PlanContext) -> Result<(), PlanViolation
         return Err(PlanViolation::ProviderNotAllowed(plan.provider.clone()));
     }
 
-    // 3 · presupuesto dentro de num_ctx (el razonamiento cuenta como salida).
-    if !plan.cabe_en_ctx() {
-        return Err(PlanViolation::BudgetExceedsCtx);
-    }
-
-    // 4 · escrituras ≤ llamadas.
-    if plan.max_write_actions > plan.max_tool_calls {
-        return Err(PlanViolation::WritesExceedCalls);
-    }
-
-    // 5 · thinking ≤ techo del producto, y off en N0/N1.
+    // 3 · thinking ≤ techo del producto, y off en N0/N1. Va antes que la cuenta de
+    // presupuesto porque es una política del producto, no una resta: un plan que
+    // pasa del techo es inválido quepa o no quepa, y decir `ThinkingAboveCeiling`
+    // sirve; decir `BudgetExceedsCtx` manda a mirar el sitio equivocado.
     match ctx.ceiling {
         None => {
             if plan.thinking != ThinkingLevel::Off {
@@ -164,6 +157,16 @@ pub fn validate_plan(plan: &Plan, ctx: &PlanContext) -> Result<(), PlanViolation
     // registra, no se calla.
     if plan.thinking != ThinkingLevel::Off && !info.supports_thinking {
         return Err(PlanViolation::ThinkingAboveCeiling);
+    }
+
+    // 4 · presupuesto dentro de num_ctx (el razonamiento cuenta como salida).
+    if !plan.cabe_en_ctx() {
+        return Err(PlanViolation::BudgetExceedsCtx);
+    }
+
+    // 5 · escrituras ≤ llamadas.
+    if plan.max_write_actions > plan.max_tool_calls {
+        return Err(PlanViolation::WritesExceedCalls);
     }
 
     // 6 · verificación no menor que el mínimo del nivel.

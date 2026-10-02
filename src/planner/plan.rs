@@ -219,14 +219,11 @@ pub fn default_timeout_s(level: Level) -> u32 {
 }
 
 /// El razonamiento ocupa presupuesto de salida: si no se cuenta aquí, la
-/// invariante de §11 se rompe justo en los modelos que piensan.
+/// invariante de §11 se rompe justo en los modelos que piensan. La tabla vive en
+/// `ThinkingLevel::presupuesto_tokens` para que sea **la misma** que la que el
+/// proveedor manda por la línea.
 pub fn thinking_extra_tokens(thinking: &ThinkingLevel) -> u32 {
-    match thinking {
-        ThinkingLevel::Off => 0,
-        ThinkingLevel::Low => 256,
-        ThinkingLevel::Medium => 1024,
-        ThinkingLevel::High => 4096,
-    }
+    thinking.presupuesto_tokens()
 }
 
 #[cfg(test)]

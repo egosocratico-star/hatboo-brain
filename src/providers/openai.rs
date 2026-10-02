@@ -82,10 +82,13 @@ impl OpenAiProvider {
             // razonamiento encendido los modelos nuevos solo aceptan
             // `max_completion_tokens`. `max_output_tokens` es de otra API y aquí
             // se ignoraría en silencio, dejando el Plan sin su presupuesto.
-            "max_tokens": req.max_output_tokens,
+            //
+            // En las dos va la SUMA (respuesta + razonamiento reservado): en esta
+            // API los tokens de razonamiento salen del mismo tope que la respuesta.
+            "max_tokens": req.tope_de_generacion(),
         });
         if req.thinking != ThinkingLevel::Off {
-            cuerpo["max_completion_tokens"] = serde_json::json!(req.max_output_tokens);
+            cuerpo["max_completion_tokens"] = serde_json::json!(req.tope_de_generacion());
         }
         // `seed` lo admiten OpenAI y la mayoría de puertas compatibles; si una no
         // lo conoce, el error viene en el status y se reporta.
@@ -391,7 +394,17 @@ mod tests {
         r.thinking = ThinkingLevel::High;
         let c = OpenAiProvider::cuerpo_de(&r, "openai");
         assert_eq!(c["reasoning_effort"], "high");
-        assert_eq!(c["max_completion_tokens"], 512);
+        // En esta API los tokens de razonamiento salen del MISMO tope que la
+        // respuesta, así que el techo que se manda es la suma: con 512 a secas, un
+        // `high` se comía la respuesta entera.
+        assert_eq!(
+            c["max_completion_tokens"],
+            512 + ThinkingLevel::High.presupuesto_tokens()
+        );
+        assert_eq!(
+            c["max_tokens"],
+            512 + ThinkingLevel::High.presupuesto_tokens()
+        );
         assert_eq!(nivel_a_thinking(&r.thinking, "anthropic"), None);
     }
 
