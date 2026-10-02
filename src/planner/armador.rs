@@ -25,6 +25,10 @@ pub struct Pie {
     /// `true` si hubo que firmar el plan seguro porque el pedido era inválido.
     pub degradado: bool,
     pub violacion: Option<PlanViolation>,
+    /// El plan pedido era inválido **y** el seguro también no cabía: aquí ya no hay
+    /// plan que firmar, y el runtime lo tiene que decir en vez de mandar al modelo
+    /// una ventana desbordada.
+    pub sin_plan_posible: Option<PlanViolation>,
 }
 
 /// Qué vale lo que el usuario trae en este turno, medido con el contador del
@@ -228,6 +232,7 @@ impl Armador {
                     descartados: vec![],
                     degradado: false,
                     violacion: None,
+                    sin_plan_posible: None,
                 }
             }
             Err(v) => {
@@ -259,14 +264,27 @@ impl Armador {
                 seguro.historial_turnos = st;
                 seguro.historial_tokens = sh;
                 seguro.reason = format!("plan pedido inválido ({}); plan seguro", v.mensaje());
-                let degradado = validate_plan(&seguro, e.ctx).is_err();
+                // `degradado` quiere decir «se firmó el seguro porque el pedido no era
+                // firmable», y eso es cierto aquí pase lo que pase. Estaba al revés:
+                // cuando el plan seguro **también** resultaba inválido el flag salía
+                // `false`, o sea que el runtime no anotaba el motivo y el panel
+                // enseñaba un plan distinto del pedido sin decir nada.
+                let sin_plan_posible = validate_plan(&seguro, e.ctx).err();
+                if let Some(v2) = &sin_plan_posible {
+                    seguro.reason = format!(
+                        "{} · y el plan seguro tampoco cabe ({})",
+                        seguro.reason,
+                        v2.mensaje()
+                    );
+                }
                 seguro.calcular_hash();
                 Pie {
                     plan: seguro,
                     porque_este_modelo: e.consejo.porque.clone(),
                     descartados: vec![],
-                    degradado: !degradado,
+                    degradado: true,
                     violacion: Some(v),
+                    sin_plan_posible,
                 }
             }
         }
@@ -353,6 +371,7 @@ fn max_writes(nivel: Level, d: &DecisionResult) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::vocab::{Intent, OutputContract, VerificationMode};
 
     /// Un N1 normal y corriente: system 200, contexto 384, salida 512.
     fn presupuesto(num_ctx: u32) -> Presupuesto {
@@ -421,5 +440,136 @@ mod tests {
         assert_eq!(p.contexto, 64, "el presupuesto de archivos es lo primero que cae");
         assert_eq!(p.max_output, 64, "y la salida después, no antes");
         assert!(p.usado(hist) <= p.num_ctx, "{p:?}");
+    }
+
+    // ---- las dos mitades del `degradado` ----
+    //
+    // Eran `degradado: !validate(seguro).is_err()`, o sea `false` justo cuando el
+    // plan seguro TAMBIÉN era inválido: el runtime no anotaba motivo, el panel
+    // enseñaba otro plan sin decirlo, y se firmaba una ventana desbordada.
+
+    fn modelo() -> ModelInfo {
+        ModelInfo {
+            id: "gemma3:1b".into(),
+            provider: "ollama".into(),
+            local: true,
+            kind: crate::models::ModelKind::Generativo,
+            profile: crate::api::vocab::Profile::Nano,
+            tier: 1,
+            ram_mb_by_ctx: Default::default(),
+            max_ctx: 8192,
+            strengths: vec![],
+            supports_tools: true,
+            supports_thinking: false,
+            supports_vision: false,
+            disco_mb: Some(815),
+        }
+    }
+
+    fn consejo(num_ctx: u32) -> Consejo {
+        Consejo {
+            num_ctx,
+            cabe: true,
+            ram_mb: Some(900),
+            libre_mb: Some(6000),
+            residente: true,
+            recarga_ms: None,
+            presion: false,
+            cargados: vec![],
+            porque: "el único que hay".into(),
+        }
+    }
+
+    /// El producto ofrece `read_file` y el registry conoce el modelo: sin estas dos
+    /// listas la validación tropieza con `ToolNotAllowed` o `UnknownModel` antes de
+    /// llegar a lo que estos tests miran.
+    fn contexto<'a>(tools: &'a [String], modelos: &'a [ModelInfo]) -> PlanContext<'a> {
+        PlanContext {
+            tools_del_producto: tools,
+            modelos,
+            ctx_permitidos: &[2048, 4096, 8192],
+            ..Default::default()
+        }
+    }
+
+    /// Un `DecisionResult` escrito a mano: lo que importa es el par (nivel,
+    /// verificación), y las reglas versionadas lo mantienen coerente por sí solas.
+    fn decision(verification: VerificationMode) -> DecisionResult {
+        DecisionResult {
+            intent: Intent::Modify,
+            level: Level::N2,
+            risk: Risk::Low,
+            skip_generative: false,
+            execution_target: ExecutionTarget::Local,
+            model_target: crate::api::vocab::ModelTarget::Indistinto,
+            tools: vec!["read_file".into()],
+            output_contract: OutputContract::Patch,
+            verification,
+            confidence: crate::api::vocab::Confidence::determinista(),
+            source: crate::api::vocab::DecisionSource::Reglas,
+            por_que: "prueba".into(),
+            salida_directa: None,
+            lectura_directa: None,
+        }
+    }
+
+    fn armar_con(d: &DecisionResult, carga: &Carga, ctx: &PlanContext) -> Pie {
+        let req = BrainRequest::nuevo("hatboo", crate::api::vocab::Mode::WORK, "arregla src/app.rs")
+            .con_tools(vec![crate::api::request::ToolInfo {
+                id: "read_file".into(),
+                escribe: false,
+                descripcion: String::new(),
+            }]);
+        Armador::armar(
+            Entrada {
+                req: &req,
+                decision: d,
+                modelo: &modelo(),
+                consejo: &consejo(4096),
+                system: "eres Hatboo",
+                carga,
+                ctx,
+            },
+            &crate::prompt::Estimador,
+        )
+    }
+
+    #[test]
+    fn un_plan_seguro_valido_se_anuncia_como_degradado() {
+        // N2 con `verificacion: ninguna` es inválido (§1: el nivel manda), y el
+        // seguro sí cabe: hay que decir que se cambió de plan.
+        let herramientas = vec!["read_file".to_string()];
+        let modelos = vec![modelo()];
+        let ctx = contexto(&herramientas, &modelos);
+        let pie = armar_con(&decision(VerificationMode::Ninguna), &Carga::default(), &ctx);
+        assert!(pie.degradado, "{:?}", pie.violacion);
+        assert!(pie.sin_plan_posible.is_none(), "{:?}", pie.sin_plan_posible);
+        assert_eq!(pie.plan.verification, VerificationMode::Determinista);
+        assert!(pie.plan.reason.contains("plan seguro"), "{}", pie.plan.reason);
+    }
+
+    #[test]
+    fn si_el_seguro_tampoco_cabe_no_se_firma_nada() {
+        // 6.000 tokens de turno en una ventana de 4096: ni el plan pedido ni el
+        // seguro. `degradado` sigue siendo verdad (se cambió de plan) y además se
+        // dice que el cambio tampoco arregla el problema.
+        let herramientas = vec!["read_file".to_string()];
+        let modelos = vec![modelo()];
+        let ctx = contexto(&herramientas, &modelos);
+        let carga = Carga {
+            mensaje_tokens: 6000,
+            historial: vec![],
+        };
+        let pie = armar_con(&decision(VerificationMode::Ninguna), &carga, &ctx);
+        assert!(pie.degradado);
+        let v = pie
+            .sin_plan_posible
+            .expect("con esa carga no hay plan firmable");
+        assert!(matches!(v, PlanViolation::BudgetExceedsCtx), "{v:?}");
+        assert!(
+            pie.plan.reason.contains("tampoco cabe"),
+            "{}",
+            pie.plan.reason
+        );
     }
 }

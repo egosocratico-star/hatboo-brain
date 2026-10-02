@@ -389,3 +389,40 @@ async fn lo_que_el_plan_admitio_es_lo_que_llega_al_proveedor() {
         peticion.prompt
     );
 }
+
+/// Y el caso contrario: un turno que no cabe NI en el plan pedido NI en el seguro.
+/// Antes `degradado` salía `false` justo ahí (estaba al revés), el runtime no
+/// anotaba ningún motivo y se firmaba una ventana desbordada. Ahora se dice.
+#[tokio::test]
+async fn un_turno_que_no_cabe_en_ningun_plan_no_se_firma() {
+    let cfg = hatboo_brain::config::loader::Cargada::leer(Some(&std::path::Path::new(
+        env!("CARGO_MANIFEST_DIR"),
+    )
+    .join("config")))
+    .unwrap();
+    let modelos = vec![modelo("gemma3:1b", false)];
+    let mock = std::sync::Arc::new(
+        hatboo_brain::providers::MockProvider::nuevo(modelos.clone()).con_nombre("ollama"),
+    );
+    let montaje = hatboo_brain::brain::Montaje {
+        proveedores: vec![mock.clone()],
+        registry: Registry::nuevo(modelos.clone()),
+        reglas: cfg.reglas.clone(),
+        herramientas: cfg.herramientas.clone(),
+        sonda: std::sync::Arc::new(hatboo_brain::resources::SondaFija::default()),
+        ..hatboo_brain::brain::Montaje::de_proveedor(mock.clone())
+    };
+    let brain = hatboo_brain::brain::Brain::nuevo(montaje).unwrap();
+    let req = BrainRequest::nuevo("hatboo", "work", "k".repeat(30_000));
+    let e = match brain.plan(&req).await {
+        Ok(p) => panic!("con 30.000 caracteres en una ventana de 4096 no hay plan: {p:?}"),
+        Err(e) => e,
+    };
+    let s = e.mensaje();
+    assert!(s.contains("num_ctx"), "{s}");
+    assert_eq!(
+        mock.n_peticiones(),
+        0,
+        "no se llama al modelo con un plan que no cabe"
+    );
+}

@@ -709,6 +709,12 @@ impl Brain {
             },
             self.contador.as_ref(),
         );
+        // Ni el pedido ni el seguro son firmables: no se manda una ventana
+        // desbordada, se dice. `Plan` es inmutable después de firmar y aquí todavía
+        // estamos antes de gastar un token.
+        if let Some(v) = pie.sin_plan_posible {
+            return Err(BrainError::InvalidPlan(v));
+        }
         Ok((pie, eleccion.porque))
     }
 
