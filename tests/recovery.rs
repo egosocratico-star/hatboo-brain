@@ -284,3 +284,96 @@ async fn escalar_por_capacidad_cambia_de_plan_no_de_ilusion() {
         );
     }
 }
+
+/// La escalada tiene que ser visible y tener linaje: `BrainEvent::Escalada` (que
+/// §7 lista y que no se emitía nunca) y `parent_plan_hash` del plan que falló.
+/// Y subir de tier NO es subir de permisos: el plan nuevo sigue con las tools que
+/// decidió el Engine, no con todas las que el producto ofrece.
+#[tokio::test]
+async fn escalar_emite_el_evento_deja_el_linaje_y_no_regala_tools() {
+    let cfg = hatboo_brain::config::loader::Cargada::leer(Some(&std::path::Path::new(
+        env!("CARGO_MANIFEST_DIR"),
+    )
+    .join("config")))
+    .unwrap();
+    let mock = Arc::new(MockProvider::nuevo(vec![modelo("nano:0.8b", 1)]).con_nombre("ollama"));
+    // El contrato del plan es `json` y el modelo contesta en prosa: `Fail` de
+    // forma. La segunda vez que se repite la clase, §1 dice que es capacidad y hay
+    // que subir de tier.
+    for _ in 0..6 {
+        mock.responde_texto("esto no es json");
+    }
+    // Reglas de un solo tiro: se fija N2 con contrato JSON sin depender del
+    // vocabulario versionado, que daría otro nivel según el mensaje. Hace falta N2
+    // porque con los dos reintentos del nivel es como una clase repetida llega a la
+    // escalada de tier (un N1 con un solo reintento aborta antes).
+    let reglas = hatboo_brain::decision::rules::Reglas::desde_json(
+        r#"{"version":1,"reglas":[{"id":"json-a-n2",
+             "cuando":[{"senal":"message_length","op":">","valor":10}],
+             "entonces":{"intent":"ask","level":"N2","contrato":"json"}}]}"#,
+    )
+    .unwrap();
+    let brain = Brain::nuevo(Montaje {
+        proveedores: vec![mock.clone()],
+        registry: Registry::nuevo(vec![modelo("nano:0.8b", 1)]),
+        reglas,
+        herramientas: cfg.herramientas.clone(),
+        sonda: Arc::new(hatboo_brain::resources::SondaFija {
+            libre: Some(8000),
+            ..Default::default()
+        }),
+        ..Montaje::de_proveedor(mock.clone())
+    })
+    .unwrap();
+    let eventos = Arc::new(RecogeEventos::default());
+    let r = brain
+        .run_with(
+            &pedido_json(),
+            OpcionesDeCorrida::nueva().con_eventos(eventos.clone()),
+        )
+        .await
+        .expect("hay salida que entregar aunque salga rechazada");
+    assert_eq!(r.plan.level, hatboo_brain::api::vocab::Level::N3, "{:?}", r.plan);
+    assert!(
+        eventos.tiene("escalada"),
+        "no se emitió Escalada: {:?}",
+        eventos.0.lock().unwrap()
+    );
+    assert!(
+        r.plan.parent_plan_hash.is_some(),
+        "el plan escalado no dice de cuál viene: {:?}",
+        r.plan
+    );
+    assert!(
+        r.plan.escalate_to.is_none() || r.plan.escalate_to.as_deref() != Some(&r.plan.model),
+        "la sugerencia de escalada no puede ser el propio modelo"
+    );
+    // Las tools: la decisión era N1 sin tools; al subir a N2 no se le regalaron las
+    // dos del producto.
+    assert!(
+        r.plan.tools.is_empty(),
+        "subir de tier no da permisos: {:?}",
+        r.plan.tools
+    );
+}
+
+/// Un pedido de chat con contrato JSON y dos tools ofrecidas por el producto.
+fn pedido_json() -> BrainRequest {
+    BrainRequest::nuevo(
+        "hatboo",
+        "chat",
+        "devuélveme en json el resumen de qué es un mutex y cuándo evitar uno",
+    )
+    .con_tools(vec![
+        hatboo_brain::api::request::ToolInfo {
+            id: "read_file".into(),
+            escribe: false,
+            descripcion: String::new(),
+        },
+        hatboo_brain::api::request::ToolInfo {
+            id: "write_file".into(),
+            escribe: true,
+            descripcion: String::new(),
+        },
+    ])
+}

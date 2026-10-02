@@ -135,6 +135,18 @@ fn encajar(mut p: Presupuesto, carga: &Carga) -> (Presupuesto, u8, u32) {
     (p, turnos, historial)
 }
 
+/// La sugerencia precomputada de adónde iría esto si escala (§1: el Governor la
+/// revalida antes de firmar el siguiente Plan). Mismo tipo de destino —local con
+/// local— porque una sugerencia que cruza a una API sin consentimiento no es una
+/// sugerencia, es una fuga. `None` si no hay ningún tier por encima.
+fn siguiente_tier(modelo: &ModelInfo, modelos: &[ModelInfo]) -> Option<ModelId> {
+    modelos
+        .iter()
+        .filter(|m| m.tier > modelo.tier && m.local == modelo.local)
+        .min_by_key(|m| m.tier)
+        .map(|m| m.id.clone())
+}
+
 pub struct Armador;
 
 impl Armador {
@@ -206,7 +218,7 @@ impl Armador {
             output_contract: e.decision.output_contract,
             verification: e.decision.verification,
             max_retries: nivel.reintentos(),
-            escalate_to: None,
+            escalate_to: siguiente_tier(e.modelo, e.ctx.modelos),
             reason: format!(
                 "{} · {} · ctx {num_ctx} · salida {max_output}{}{}",
                 e.decision.por_que,
@@ -532,6 +544,27 @@ mod tests {
             },
             &crate::prompt::Estimador,
         )
+    }
+
+    /// La sugerencia de escalada existe y no es un pozo sin fondo: `None` cuando el
+    /// modelo ya es el tier más alto del registry.
+    #[test]
+    fn escalate_to_sugiere_el_siguiente_tier_del_mismo_tipo() {
+        let herramientas = vec!["read_file".to_string()];
+        let mut arriba = modelo();
+        arriba.id = "grande:9b".into();
+        arriba.tier = 3;
+        let mut nube = modelo();
+        nube.id = "api:9b".into();
+        nube.tier = 2;
+        nube.local = false;
+        let modelos = vec![modelo(), arriba.clone(), nube];
+        let ctx = contexto(&herramientas, &modelos);
+        let pie = armar_con(&decision(VerificationMode::Determinista), &Carga::default(), &ctx);
+        // El siguiente tier por encima del nano (tier 1) es `grande:9b` (tier 3)…
+        assert_eq!(pie.plan.escalate_to.as_deref(), Some("grande:9b"));
+        // …y no la API de tier 2, que está más cerca pero cruzar el destino sin
+        // consentimiento no es una sugerencia, es una fuga.
     }
 
     #[test]

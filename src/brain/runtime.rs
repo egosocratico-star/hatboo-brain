@@ -8,7 +8,7 @@ use crate::api::response::{
     BrainResult, DecisionTrace, Output, OutputStatus, TaskMetrics, ToolCall,
 };
 use crate::api::vocab::{
-    ApprovalLevel, ExecutionTarget, FailureClass, ThinkingLevel, ToolId,
+    ApprovalLevel, ExecutionTarget, FailureClass, Level, ThinkingLevel, ToolId,
 };
 use crate::config::schema::BrainConfig;
 use crate::context::{self, Prioridad};
@@ -311,6 +311,11 @@ impl Brain {
         // Última salida con su presupuesto, por si hay que entregar sin volver a
         // generar (rondas agotadas).
         let mut ultima: Option<(Plan, GenerationResult, Preparado)> = None;
+        // El linaje de los Planes (§VIII): cuando el escalador pide un plan nuevo,
+        // el siguiente lleva `parent_plan_hash` del que falló y se emite `Escalada`.
+        // Sin esto el campo y el evento existían pero no los producía nadie.
+        let mut hash_previo: Option<String> = None;
+        let mut escalada_pendiente: Option<(Level, String)> = None;
 
         loop {
             if opts.cancelar.cancelado() {
@@ -341,7 +346,26 @@ impl Brain {
                 }));
             }
 
-            let (pie, porque_modelo) = self.planificar(req, &decision).await?;
+            let (mut pie, porque_modelo) = self.planificar(req, &decision).await?;
+            // Linaje (§VIII): todo plan que no es el primero de la corrida lleva el
+            // hash del que dejó de correr. `parent_plan_hash` está fuera del hash,
+            // así que anotarlo aquí no rompe el que ya firmó el Armador.
+            if hash_previo.is_some() && pie.plan.plan_hash != hash_previo {
+                pie.plan.parent_plan_hash = hash_previo.clone();
+            }
+            if let Some((desde, porque)) = escalada_pendiente.take() {
+                // El escalador pidió subir de tier; se emite solo si de verdad subió
+                // (en N3 no hay adónde, y un evento igual-a-igual mentiría).
+                if pie.plan.level != desde {
+                    self.emitir(opts, BrainEvent::Escalada {
+                        desde,
+                        a: pie.plan.level,
+                        modelo: pie.plan.model.clone(),
+                        porque,
+                    });
+                }
+            }
+            hash_previo = pie.plan.plan_hash.clone();
             let plan = pie.plan.clone();
             if plan_vigente.as_deref() != plan.plan_hash.as_deref() {
                 plan_vigente = plan.plan_hash.clone();
@@ -383,9 +407,11 @@ impl Brain {
                             porque,
                         } => {
                             reintentos += 1;
-                            recuperacion.push(porque);
+                            recuperacion.push(porque.clone());
+                            let desde = decision.level;
                             if subir_tier {
                                 self.subir_tier(&mut decision, req);
+                                escalada_pendiente = Some((desde, porque));
                             }
                             continue;
                         }
@@ -464,8 +490,10 @@ impl Brain {
                         Accion::NuevoPlan { subir_tier, porque: por } => {
                             reintentos += 1;
                             recuperacion.push(format!("{porque} → {por}"));
+                            let desde = decision.level;
                             if subir_tier {
                                 self.subir_tier(&mut decision, req);
+                                escalada_pendiente = Some((desde, por));
                             }
                             continue;
                         }
@@ -597,8 +625,10 @@ impl Brain {
                 } => {
                     reintentos += 1;
                     recuperacion.push(format!("{porque} → {por}"));
+                    let desde = decision.level;
                     if subir_tier {
                         self.subir_tier(&mut decision, req);
+                        escalada_pendiente = Some((desde, por));
                     }
                     continue;
                 }
@@ -630,13 +660,17 @@ impl Brain {
         self.motor.lock().unwrap().evaluar(req)
     }
 
-    fn subir_tier(&self, d: &mut DecisionResult, req: &BrainRequest) {
+    /// Subir de tier **no** es subir de permisos. Antes, si la decisión venía sin
+    /// tools y el nuevo nivel las permitía, se les daban todas las del producto
+    /// (`req.tools.ids()`, `write_file` y `git_commit` incluidos) a un turno que
+    /// nadie declaró de escritura: el salto de ancho de presupuesto venía del
+    /// escalador, no de una decisión. Lo que sube aquí es nivel, verificación mínima
+    /// y, con el nivel, el `num_ctx` y la salida — las tools siguen las que eligió
+    /// el Engine.
+    fn subir_tier(&self, d: &mut DecisionResult, _req: &BrainRequest) {
         if let Some(s) = d.level.siguiente() {
             d.level = s;
             d.verification = s.verificacion_minima().max(d.verification);
-            if d.tools.is_empty() && s.permite_tools() {
-                d.tools = req.tools.ids();
-            }
             d.por_que.push_str(" · escaló de nivel");
         }
     }
