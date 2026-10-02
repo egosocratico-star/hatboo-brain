@@ -299,6 +299,10 @@ impl Brain {
         let mut recargas: u32 = 0;
         let mut rondas: u8 = 0;
         let mut recuperacion: Vec<String> = Vec::new();
+        // La última clase que hizo intervenir al escalador. Es lo que cuenta
+        // `metrics.clase_fallo`, y hasta aquí la métrica estaba fija en `None`
+        // aunque la corrida hubiera tropezado tres veces.
+        let mut ultima_clase: Option<FailureClass> = None;
         // Presupuesto de tools del Plan vigente: se reinicia solo cuando cambia el
         // plan firmado. Reiniciarlo cada ronda multiplica `max_write_actions` por
         // el número de rondas.
@@ -322,18 +326,19 @@ impl Brain {
                     None => return Err(BrainError::Timeout),
                 };
                 recuperacion.push("rondas de herramientas agotadas".into());
-                return Ok(self.resultado(
+                return Ok(self.resultado(Cierre {
                     req,
-                    &plan,
-                    &g,
-                    vec![],
-                    VerificationResult::NoRequerida,
-                    OutputStatus::SinVerificar,
+                    plan: &plan,
+                    g: &g,
+                    preparado: &preparado,
+                    llamadas: vec![],
+                    verificacion: VerificationResult::NoRequerida,
+                    status: OutputStatus::SinVerificar,
                     inicio,
                     reintentos,
                     recargas,
-                    &preparado,
-                ));
+                    clase_fallo: ultima_clase,
+                }));
             }
 
             let (pie, porque_modelo) = self.planificar(req, &decision).await?;
@@ -365,6 +370,7 @@ impl Brain {
                 Ok(g) => g,
                 Err(e) => {
                     let clase = classifier::clasificar(&classifier::Origen::Error(&e));
+                    ultima_clase = Some(clase);
                     match escalador.decidir(clase) {
                         Accion::Reintentar { porque, intento, .. } => {
                             reintentos = intento;
@@ -396,12 +402,13 @@ impl Brain {
             ultima = Some((plan.clone(), g.clone(), preparado.clone()));
 
             // Tools: se ejecutan lo que el Plan y el producto dejan; lo demás se
-            // rechaza en código y se le dice al modelo.
+            // rechaza en código y **se le dice al modelo**, con motivo.
             if !g.tool_calls.is_empty() {
-                let (llamadas, algo_se_ejecuto, nuevo_consumo) = self
+                let ronda = self
                     .herramientas_del_turno(&plan, &g, req, opts, consumo)
                     .await;
-                consumo = nuevo_consumo;
+                consumo = ronda.consumo;
+                let llamadas = ronda.llamadas;
                 // Lo que devolvió cada tool entra en el turno siguiente como
                 // observación. Sin esto el modelo nunca lee el resultado y repite
                 // la misma llamada hasta agotar las rondas: medido, ocho
@@ -419,22 +426,68 @@ impl Brain {
                         ));
                     }
                 }
-                if algo_se_ejecuto {
+                if ronda.algo_se_ejecuto {
                     continue;
                 }
+                // Nadie ejecutó, pero la puerta sí dijo que no a algo. Eso es la
+                // clase `tool`, y el escalador decide si se insiste (el modelo ya
+                // tiene el motivo en las observaciones), se cambia de plan o se
+                // entrega. Devolverlo callado a `Propuesto` era el agujero por el
+                // que `FailureClass::Tool` no lo producía nadie.
+                if let Some(decis) = ronda.rechazo {
+                    let origen = if matches!(
+                        decis,
+                        Deciso::RechazadaPresupuesto | Deciso::RechazadaPresupuestoEscrituras
+                    ) {
+                        classifier::Origen::PresupuestoAgotado
+                    } else {
+                        classifier::Origen::ToolRechazada
+                    };
+                    let clase = classifier::clasificar(&origen);
+                    ultima_clase = Some(clase);
+                    let porque = format!("{}: {}", decis.motivo(), classifier::motivo(&origen));
+                    match escalador.decidir(clase) {
+                        Accion::Reintentar {
+                            porque: por,
+                            intento,
+                            ..
+                        } => {
+                            reintentos = intento;
+                            recuperacion.push(format!("{porque} → {por}"));
+                            self.emitir(opts, BrainEvent::Reintento { clase, intento });
+                            observaciones.push(format!(
+                                "{porque}. Cambia el enfoque: usa solo las tools del Plan \
+                                 o entrega la respuesta sin ellas."
+                            ));
+                            continue;
+                        }
+                        Accion::NuevoPlan { subir_tier, porque: por } => {
+                            reintentos += 1;
+                            recuperacion.push(format!("{porque} → {por}"));
+                            if subir_tier {
+                                self.subir_tier(&mut decision, req);
+                            }
+                            continue;
+                        }
+                        Accion::Abortar { porque: por } => {
+                            recuperacion.push(format!("{porque} → {por}"));
+                        }
+                    }
+                }
                 // Nadie ejecutó: se devuelven las llamadas pendientes tal cual.
-                return Ok(self.resultado(
+                return Ok(self.resultado(Cierre {
                     req,
-                    &plan,
-                    &g,
+                    plan: &plan,
+                    g: &g,
+                    preparado: &preparado,
                     llamadas,
-                    VerificationResult::NoRequerida,
-                    OutputStatus::Propuesto,
+                    verificacion: VerificationResult::NoRequerida,
+                    status: OutputStatus::Propuesto,
                     inicio,
                     reintentos,
                     recargas,
-                    &preparado,
-                ));
+                    clase_fallo: ultima_clase,
+                }));
             }
 
             let verificacion = self.verificar_salida(req, &plan, &g.texto);
@@ -453,58 +506,62 @@ impl Brain {
             );
 
             if verificacion.es_pass() {
-                return Ok(self.resultado(
+                return Ok(self.resultado(Cierre {
                     req,
-                    &plan,
-                    &g,
-                    vec![],
+                    plan: &plan,
+                    g: &g,
+                    preparado: &preparado,
+                    llamadas: vec![],
                     verificacion,
-                    OutputStatus::Verificado,
+                    status: OutputStatus::Verificado,
                     inicio,
                     reintentos,
                     recargas,
-                    &preparado,
-                ));
+                    clase_fallo: ultima_clase,
+                }));
             }
 
             if let VerificationResult::Unverifiable { .. } = verificacion {
                 // No es éxito y no es error: se entrega así, con el status honesto.
-                return Ok(self.resultado(
+                return Ok(self.resultado(Cierre {
                     req,
-                    &plan,
-                    &g,
-                    vec![],
+                    plan: &plan,
+                    g: &g,
+                    preparado: &preparado,
+                    llamadas: vec![],
                     verificacion,
-                    OutputStatus::SinVerificar,
+                    status: OutputStatus::SinVerificar,
                     inicio,
                     reintentos,
                     recargas,
-                    &preparado,
-                ));
+                    clase_fallo: ultima_clase,
+                }));
             }
 
             if matches!(verificacion, VerificationResult::NoRequerida) {
                 // El Plan no pidió verificación —es lo que firma un N0—, así que
                 // no hay nada que reparar: reintentar sería cobrarle una segunda
                 // llamada al modelo por un turno que no tenía nada que comprobar.
-                return Ok(self.resultado(
+                return Ok(self.resultado(Cierre {
                     req,
-                    &plan,
-                    &g,
-                    vec![],
+                    plan: &plan,
+                    g: &g,
+                    preparado: &preparado,
+                    llamadas: vec![],
                     verificacion,
-                    OutputStatus::Propuesto,
+                    status: OutputStatus::Propuesto,
                     inicio,
                     reintentos,
                     recargas,
-                    &preparado,
-                ));
+                    clase_fallo: ultima_clase,
+                }));
             }
 
             let (clase, porque) = match &verificacion {
                 VerificationResult::Fail { clase, motivo } => (*clase, motivo.clone()),
                 _ => (FailureClass::Formato, "sin clase".to_string()),
             };
+            ultima_clase = Some(clase);
             match escalador.decidir(clase) {
                 Accion::Reintentar {
                     ajustes,
@@ -549,18 +606,19 @@ impl Brain {
                     recuperacion.push(format!("{porque} → {por}"));
                     // Se entrega lo que hay, marcado como rechazado: no se finge
                     // que está listo.
-                    return Ok(self.resultado(
+                    return Ok(self.resultado(Cierre {
                         req,
-                        &plan,
-                        &g,
-                        vec![],
+                        plan: &plan,
+                        g: &g,
+                        preparado: &preparado,
+                        llamadas: vec![],
                         verificacion,
-                        OutputStatus::Rechazado,
+                        status: OutputStatus::Rechazado,
                         inicio,
                         reintentos,
                         recargas,
-                        &preparado,
-                    ));
+                        clase_fallo: ultima_clase,
+                    }));
                 }
             }
         }
@@ -798,7 +856,7 @@ impl Brain {
         req: &BrainRequest,
         opts: &OpcionesDeCorrida,
         consumo: (u32, u32),
-    ) -> (Vec<ToolCall>, bool, (u32, u32)) {
+    ) -> Ronda {
         // Qué es una escritura lo decide el producto para ESTE turno
         // (`req.tools.es_write`, que es la declaración que acompaña a sus tools) y,
         // si el id no está en esa lista, el catálogo del crate. Antes se miraba
@@ -810,6 +868,9 @@ impl Brain {
         let mut puerta = Puerta::nueva(plan, escribe).con_consumo(consumo.0, consumo.1);
         let mut out = Vec::new();
         let mut algo = false;
+        // La última puerta que dijo que no. Con ella la corrida sabe si tiene que
+        // avisar al escalador (`FailureClass::Tool`) o entregar lo pendiente.
+        let mut rechazo: Option<Deciso> = None;
         for l in &g.tool_calls {
             let decis = puerta.autorizar(&l.tool);
             if !decis.permitida() {
@@ -817,6 +878,17 @@ impl Brain {
                     tool: l.tool.clone(),
                     contra_presupuesto: !matches!(decis, Deciso::RechazadaFueraDelPlan),
                 });
+                // Se ancla el motivo en la propia llamada: si no, el modelo no se
+                // entera de que le cortaron algo y repite la misma llamada hasta
+                // agotar las rondas (medido: ocho generaciones idénticas y un
+                // `Timeout` por cara).
+                out.push(ToolCall {
+                    tool: l.tool.clone(),
+                    args: l.args.clone(),
+                    resultado: Some(decis.motivo().to_string()),
+                    ok: false,
+                });
+                rechazo = Some(decis);
                 continue;
             }
             let necesita = self
@@ -873,7 +945,12 @@ impl Brain {
                 }),
             }
         }
-        (out, algo, puerta.consumo())
+        Ronda {
+            llamadas: out,
+            algo_se_ejecuto: algo,
+            rechazo,
+            consumo: puerta.consumo(),
+        }
     }
 
     fn schemas_de(&self, tools: &[ToolId]) -> Vec<ToolSchema> {
@@ -936,21 +1013,25 @@ impl Brain {
         verification::verificar(plan.verification, &c, &e)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn resultado(
-        &self,
-        req: &BrainRequest,
-        plan: &Plan,
-        g: &GenerationResult,
-        llamadas: Vec<ToolCall>,
-        verificacion: VerificationResult,
-        status: OutputStatus,
-        inicio: std::time::Instant,
-        reintentos: u8,
-        recargas: u32,
-        preparado: &Preparado,
-    ) -> BrainResult {
-        let metrics = self.metricas(plan, g, inicio, reintentos, recargas, preparado);
+    /// Todo lo que hace falta para cerrar una corrida y entregarla. Eran diez
+    /// argumentos de posición en cada una de las ocho salidas del bucle —con dos
+    /// `u32` seguidos que se podían intercambiar sin que el compilador se enterara—,
+    /// así que van agrupados.
+    fn resultado(&self, c: Cierre) -> BrainResult {
+        let metrics = self.metricas(&c);
+        let Cierre {
+            req,
+            plan,
+            g,
+            preparado: _,
+            llamadas,
+            verificacion,
+            status,
+            inicio: _,
+            reintentos: _,
+            recargas: _,
+            clase_fallo: _,
+        } = c;
         let r = BrainResult {
             output: Output {
                 texto: g.texto.clone(),
@@ -966,41 +1047,42 @@ impl Brain {
         r
     }
 
-    fn metricas(
-        &self,
-        plan: &Plan,
-        g: &GenerationResult,
-        inicio: std::time::Instant,
-        reintentos: u8,
-        recargas: u32,
-        preparado: &Preparado,
-    ) -> TaskMetrics {
-        let tokens = g.tokens_entrada.unwrap_or(0) + g.tokens_salida.unwrap_or(0);
+    /// La métrica sale del cierre, no de ocho argumentos de posición (y con `self`
+    /// eran nueve, justo lo que clippy no perdona). Lo que le faltaba a esta firma
+    /// era lo que ahora trae: la clase de fallo de la corrida.
+    fn metricas(&self, c: &Cierre) -> TaskMetrics {
+        let tokens = c.g.tokens_entrada.unwrap_or(0) + c.g.tokens_salida.unwrap_or(0);
+        let duracion = c.inicio.elapsed();
         let coste = self
             .config
-            .referencia(&plan.model)
+            .referencia(&c.plan.model)
             .map(|r: Referencia| {
                 r.coste(
                     r.ram_gb,
-                    inicio.elapsed().as_secs_f32(),
+                    duracion.as_secs_f32(),
                     tokens,
-                    reintentos,
+                    c.reintentos,
                 )
                 .total
             });
         TaskMetrics {
-            duracion_ms: inicio.elapsed().as_millis() as u64,
-            ttft_ms: g.ttft_ms,
-            tokens_entrada: g.tokens_entrada,
-            tokens_salida: g.tokens_salida,
-            tok_s: g.tok_s,
+            duracion_ms: duracion.as_millis() as u64,
+            ttft_ms: c.g.ttft_ms,
+            tokens_entrada: c.g.tokens_entrada,
+            tokens_salida: c.g.tokens_salida,
+            tok_s: c.g.tok_s,
             // El crate no mide la RAM del proceso ajeno: la pone el producto en
             // su panel. Aquí se deja en None si no hay medida.
             ram_mb: None,
-            recargas,
-            reintentos,
-            contexto_rechazado: preparado.rechazado.len() as u32,
-            clase_fallo: None,
+            recargas: c.recargas,
+            reintentos: c.reintentos,
+            contexto_rechazado: c.preparado.rechazado.len() as u32,
+            // La última clase que hizo intervenir al escalador; si no la hubo pero
+            // el veredicto es un `Fail`, la clase es la del veredicto.
+            clase_fallo: c.clase_fallo.or(match &c.verificacion {
+                VerificationResult::Fail { clase, .. } => Some(*clase),
+                _ => None,
+            }),
             coste,
         }
     }
@@ -1090,10 +1172,10 @@ impl Brain {
         reg.tokens_entrada = r.metrics.tokens_entrada;
         reg.tokens_salida = r.metrics.tokens_salida;
         reg.contexto_rechazado = r.metrics.contexto_rechazado;
-        reg.clase_fallo = match &r.verification {
-            VerificationResult::Fail { clase, .. } => Some(format!("{clase:?}")),
-            _ => None,
-        };
+        // La clase la lleva la métrica de la corrida (el escalador es el que sabe
+        // si tropezó con el entorno, con la forma o con una tool); derivarla otra
+        // vez del veredicto dejaba fuera todo lo que no fuera un `Fail`.
+        reg.clase_fallo = r.metrics.clase_fallo.map(|c| format!("{c:?}"));
         reg.latencia_ms = Some(r.metrics.duracion_ms);
         reg.ttft_ms = r.metrics.ttft_ms;
         reg.tok_s = r.metrics.tok_s;
@@ -1117,6 +1199,33 @@ struct Preparado {
     turno: String,
     rechazado: Vec<String>,
     residente: bool,
+}
+
+/// Lo que hizo una ronda de tools. `rechazo` guarda la última puerta que dijo que
+/// no: sin eso el runtime no podía saber que la ronda terminó en nada por su culpa
+/// (y `FailureClass::Tool` no la producía nadie).
+struct Ronda {
+    llamadas: Vec<ToolCall>,
+    algo_se_ejecuto: bool,
+    rechazo: Option<Deciso>,
+    consumo: (u32, u32),
+}
+
+/// Todo lo que hace falta para cerrar una corrida y entregarla. Iban diez
+/// argumentos de posición en cada una de las seis salidas del bucle, con dos `u32`
+/// seguidos que se podían intercambiar sin que el compilador se enterara.
+struct Cierre<'a> {
+    req: &'a BrainRequest,
+    plan: &'a Plan,
+    g: &'a GenerationResult,
+    preparado: &'a Preparado,
+    llamadas: Vec<ToolCall>,
+    verificacion: VerificationResult,
+    status: OutputStatus,
+    inicio: std::time::Instant,
+    reintentos: u8,
+    recargas: u32,
+    clase_fallo: Option<FailureClass>,
 }
 
 fn con_error(e: ProviderError) -> BrainError {

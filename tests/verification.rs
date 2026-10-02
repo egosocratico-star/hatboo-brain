@@ -557,6 +557,80 @@ async fn el_resultado_de_la_tool_vuelve_al_modelo() {
     assert!(!r.output.texto.is_empty(), "el turno terminó sin salida");
 }
 
+/// La puerta dijo que no: el modelo tiene que enterarse, la corrida tiene que
+/// clasificarlo como `tool` y el escalador tiene que ponerle un techo. Antes la
+/// llamada rechazada se tiraba a la basura, así que el modelo repetía la misma
+/// llamada hasta `MAX_RONDAS` y `FailureClass::Tool` no la producía nadie.
+#[tokio::test]
+async fn una_tool_fuera_del_plan_se_le_dice_al_modelo_y_cuenta_como_fallo() {
+    let cfg = Cargada::leer(Some(&Path::new(env!("CARGO_MANIFEST_DIR")).join("config"))).unwrap();
+    let mock = Arc::new(MockProvider::nuevo(vec![modelo()]).con_nombre("ollama"));
+    for _ in 0..8 {
+        mock.responde(GenerationResult {
+            tool_calls: vec![hatboo_brain::providers::LlamadaTool {
+                tool: "rm_todo".into(),
+                args: serde_json::json!({ "path": "." }),
+            }],
+            ..Default::default()
+        });
+    }
+    let brain = cerebro(mock.clone(), &cfg);
+    let r = brain
+        .run(&pedido(
+            "Corrige el error de compilación de src/main.rs",
+            "work",
+            None,
+        ))
+        .await
+        .unwrap();
+
+    // 1 · el motivo llega al turno siguiente, mezclado con las observaciones.
+    let peticiones = mock.peticiones();
+    assert!(
+        peticiones.len() >= 2,
+        "no hubo una vuelta con el rechazo: {}",
+        peticiones.len()
+    );
+    assert!(
+        peticiones[1].prompt.contains("rm_todo"),
+        "el modelo no se enteró de qué se rechazó: {:?}",
+        peticiones[1].prompt
+    );
+    assert!(
+        peticiones[1].prompt.contains("no está en el Plan"),
+        "sin motivo no hay nada que corregir: {:?}",
+        peticiones[1].prompt
+    );
+
+    // 2 · el bucle se corta con el presupuesto de reintentos, no con las rondas.
+    assert!(
+        peticiones.len() < 8,
+        "repitió hasta agotar MAX_RONDAS: {}",
+        peticiones.len()
+    );
+
+    // 3 · la métrica lo dice: `Tool` es alcanzable y ya no es un `None` fijo.
+    assert_eq!(
+        r.metrics.clase_fallo,
+        Some(hatboo_brain::api::vocab::FailureClass::Tool),
+        "{:?}",
+        r.metrics
+    );
+    // Y la llamada rechazada se ve en el resultado, con su motivo, no borrada.
+    let rechazada = r
+        .output
+        .tool_calls
+        .iter()
+        .find(|c| c.tool == "rm_todo")
+        .expect("la llamada rechazada tiene que quedar en el resultado");
+    assert!(!rechazada.ok);
+    assert!(
+        rechazada.resultado.as_deref().unwrap_or("").contains("Plan"),
+        "{:?}",
+        rechazada.resultado
+    );
+}
+
 /// §II.10 probado con las dos mitades: encendida, la pieza corre y se le cobra el
 /// comando al ejecutor; apagada, no se ejecuta nada en el proyecto y el veredicto
 /// sigue diciendo la verdad. Hasta aquí `verificacion_ejecucion` no lo leía nadie,

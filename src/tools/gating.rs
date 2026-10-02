@@ -6,7 +6,7 @@
 use crate::api::vocab::ToolId;
 use crate::planner::Plan;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Deciso {
     Permitida,
     /// Fuera del Plan: no se describe, no se ejecuta, y se emite `ToolDenegada`.
@@ -20,6 +20,20 @@ pub enum Deciso {
 impl Deciso {
     pub fn permitida(&self) -> bool {
         matches!(self, Deciso::Permitida)
+    }
+
+    /// Lo que se le dice al modelo cuando la puerta dijo que no. Rechazar en
+    /// silencio era dejarle repetir la misma llamada hasta agotar las rondas: sin
+    /// motivo no hay nada que corregir, y el bucle sale por arriba (`Timeout`).
+    pub fn motivo(&self) -> &'static str {
+        match self {
+            Deciso::Permitida => "",
+            Deciso::RechazadaFueraDelPlan => "no está en el Plan de este turno",
+            Deciso::RechazadaPresupuesto => "se agotó el presupuesto de acciones del Plan",
+            Deciso::RechazadaPresupuestoEscrituras => {
+                "se agotó el presupuesto de escrituras del Plan"
+            }
+        }
     }
 }
 
@@ -99,6 +113,25 @@ mod tests {
     use crate::api::vocab::{
         ExecutionTarget, Intent, Level, OutputContract, ThinkingLevel, VerificationMode,
     };
+
+    /// Un rechazo sin motivo es un modelo repitiendo la misma llamada hasta agotar
+    /// las rondas. Cada `Deciso` que dice que no tiene que decir por qué.
+    #[test]
+    fn toda_negativa_de_la_puerta_tiene_motivo() {
+        assert_eq!(Deciso::Permitida.motivo(), "");
+        for d in [
+            Deciso::RechazadaFueraDelPlan,
+            Deciso::RechazadaPresupuesto,
+            Deciso::RechazadaPresupuestoEscrituras,
+        ] {
+            assert!(!d.motivo().is_empty(), "{d:?} se queda sin motivo");
+            assert!(
+                d.motivo().contains("Plan") || d.motivo().contains("presupuesto"),
+                "{d:?}: {}",
+                d.motivo()
+            );
+        }
+    }
 
     fn plan(tools: &[&str], llamadas: u32, escrituras: u32) -> Plan {
         let mut p = Plan::firmar(
