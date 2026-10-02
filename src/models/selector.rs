@@ -117,7 +117,10 @@ pub fn elegir(
     // y quedan 1128» que parece un error de aritmética.
     let (needed_mb, free_mb) = match mas_barato {
         Some((ram, c)) => (
-            (ram + governor.config.margen_mb) as u32,
+            // El margen del consejo, no `config.margen_mb`: es el que estrecha el
+            // Governor cuando conoce el total, y la suma que se le enseña al
+            // usuario tiene que ser la que produjo el rechazo.
+            (ram + c.margen_mb) as u32,
             c.libre_mb.unwrap_or(0) as u32,
         ),
         _ => (0, 0),

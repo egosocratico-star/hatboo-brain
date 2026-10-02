@@ -487,6 +487,7 @@ mod tests {
             residente: true,
             recarga_ms: None,
             presion: false,
+            margen_mb: 1500,
             cargados: vec![],
             porque: "el único que hay".into(),
         }

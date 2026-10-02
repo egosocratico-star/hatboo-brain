@@ -80,15 +80,21 @@ impl OpenAiProvider {
             "temperature": req.temperature,
             // En `/chat/completions` el tope de salida es `max_tokens`; con
             // razonamiento encendido los modelos nuevos solo aceptan
-            // `max_completion_tokens`. `max_output_tokens` es de otra API y aquí
-            // se ignoraría en silencio, dejando el Plan sin su presupuesto.
+            // `max_completion_tokens`, y las dos claves a la vez son un 400
+            // («both max_tokens and max_completion_tokens are not supported»), así
+            // que se manda **una** u otra según el `thinking` firmado.
             //
-            // En las dos va la SUMA (respuesta + razonamiento reservado): en esta
-            // API los tokens de razonamiento salen del mismo tope que la respuesta.
-            "max_tokens": req.tope_de_generacion(),
+            // En la que sea va la SUMA (respuesta + razonamiento reservado): en
+            // esta API los tokens de razonamiento salen del mismo tope que la
+            // respuesta. `max_output_tokens` es de otra API y aquí se ignoraría en
+            // silencio, dejando el Plan sin su presupuesto.
+            "temperature": req.temperature,
         });
+        let tope = serde_json::json!(req.tope_de_generacion());
         if req.thinking != ThinkingLevel::Off {
-            cuerpo["max_completion_tokens"] = serde_json::json!(req.tope_de_generacion());
+            cuerpo["max_completion_tokens"] = tope;
+        } else {
+            cuerpo["max_tokens"] = tope;
         }
         // `seed` lo admiten OpenAI y la mayoría de puertas compatibles; si una no
         // lo conoce, el error viene en el status y se reporta.
@@ -401,9 +407,11 @@ mod tests {
             c["max_completion_tokens"],
             512 + ThinkingLevel::High.presupuesto_tokens()
         );
-        assert_eq!(
-            c["max_tokens"],
-            512 + ThinkingLevel::High.presupuesto_tokens()
+        // Las dos claves a la vez son un 400: con razonamiento solo va
+        // `max_completion_tokens`.
+        assert!(
+            c.get("max_tokens").is_none(),
+            "con razonamiento no se mandan los dos topes: {c}"
         );
         assert_eq!(nivel_a_thinking(&r.thinking, "anthropic"), None);
     }

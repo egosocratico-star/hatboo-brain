@@ -52,6 +52,13 @@ pub struct Consejo {
     pub recarga_ms: Option<u64>,
     /// Perfíl ligero activo (batería o CPU alta).
     pub presion: bool,
+    /// El margen **con el que se comprobó** este consejo. No es `config.margen_mb`
+    /// cuando la sonda conoce el total (ahí se estrecha a la octava parte): el
+    /// Selector y el aviso de «no cabe» tienen que citar este número, porque es el
+    /// que decidión. Mientras citaron el de la spec, se reportaba «hacen falta
+    /// 2400» por una comprobación que pedía 1956.
+    #[serde(default)]
+    pub margen_mb: u64,
     /// Lo que hay cargado, para el panel y para decidir expulsiones.
     pub cargados: Vec<ModeloCargado>,
     /// Por qué este consejo. Se muestra.
@@ -93,6 +100,18 @@ impl Governor {
         bateria || cpu
     }
 
+    /// El margen de §11 son 1500 MB, pero en una máquina de 8,45 GB eso hace
+    /// que NUNCA quepa un modelo local: con 1,6 GB libres y un modelo de 878,
+    /// pedir 2378 es rechazarlo siempre. Donde se conoce el total, el margen
+    /// se estrecha a la octava parte (1056 MB aquí) y se sigue dejando constar
+    /// en el aviso; sin ese dato, manda el de la spec.
+    pub fn margen_efectivo(&self, total_mb: Option<u64>) -> u64 {
+        match total_mb {
+            Some(t) if t > 0 => self.config.margen_mb.min(t / 8),
+            _ => self.config.margen_mb,
+        }
+    }
+
     /// ¿Cabe el modelo pedido, y a qué `num_ctx`? Recorre la escalera de abajo
     /// arriba: el contexto más pequeño que cumpla el nivel gana, porque cada
     /// escalón cuesta RAM y a veces una recarga.
@@ -103,15 +122,7 @@ impl Governor {
         let presion = self.bajo_presion(sonda);
 
         let minimo = nivel.num_ctx_minimo();
-        // El margen de §11 son 1500 MB, pero en una máquina de 8,45 GB eso hace
-        // que NUNCA quepa un modelo local: con 1,6 GB libres y un modelo de 878,
-        // pedir 2378 es rechazarlo siempre. Donde se conoce el total, el margen
-        // se estrecha a la octava parte (1056 MB aquí) y se sigue dejando constar
-        // en el aviso; sin ese dato, manda el de la spec.
-        let margen = match sonda.total_mb() {
-            Some(t) if t > 0 => self.config.margen_mb.min(t / 8),
-            _ => self.config.margen_mb,
-        };
+        let margen = self.margen_efectivo(sonda.total_mb());
         let escalera: Vec<u32> = self
             .config
             .ctx_permitidos
@@ -130,6 +141,7 @@ impl Governor {
                 residente: false,
                 recarga_ms: None,
                 presion,
+                margen_mb: margen,
                 cargados,
                 porque: format!(
                     "{} no admite ningún num_ctx del conjunto permitido para {nivel:?} (máx. declarado {})",
@@ -173,6 +185,7 @@ impl Governor {
                     residente,
                     recarga_ms: recarga,
                     presion,
+                    margen_mb: margen,
                     cargados,
                     porque: match (residente, recarga) {
                         (true, _) => format!("«{}» ya está residente a {ctx}", modelo.id),
@@ -205,14 +218,27 @@ impl Governor {
             residente: residente_actual.is_some(),
             recarga_ms: None,
             presion,
+            margen_mb: margen,
             cargados,
             porque: match (ram, libre) {
+                // Las cifras tienen que ser las que se usaron de verdad. Sacar
+                // `config.margen_mb` aquí era decir «margen 1500» en una máquina
+                // donde el comprobador estrechó el margen a t/8: el aviso no
+                // explicaba el rechazo que acababa de producir.
+                (Some(r), Some(l)) if margen != self.config.margen_mb => format!(
+                    "no cabe: «{}» necesita {} MB a {menor} y quedan {} libres (margen {} de los {} de la spec, estrechado a la octava parte del total)",
+                    modelo.id,
+                    r,
+                    l,
+                    margen,
+                    self.config.margen_mb
+                ),
                 (Some(r), Some(l)) => format!(
                     "no cabe: «{}» necesita {} MB a {menor} y quedan {} libres (margen {})",
                     modelo.id,
                     r,
                     l,
-                    self.config.margen_mb
+                    margen
                 ),
                 (Some(_), None) => format!("no se puede afirmar que «{}» quepa: la sonda no mide RAM libre", modelo.id),
                 (None, _) => format!("«{}» no tiene RAM medida para ningún num_ctx del conjunto", modelo.id),

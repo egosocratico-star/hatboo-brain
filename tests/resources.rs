@@ -176,6 +176,37 @@ fn nada_cabe_dan_las_cifras_y_es_recuperable() {
     assert!(err.recuperable());
 }
 
+/// El margen de la spec son 1500 MB, pero el comprobador lo estrecha a t/8 cuando
+/// conoce el total. El aviso de «no cabe» tiene que decir el número con el que
+/// rechazó, no el de la spec: si no, explica un rechazo que no hizo.
+#[test]
+fn el_aviso_de_no_cabe_dice_el_margen_con_el_que_rechazo() {
+    let reg = Registry::nuevo(vec![modelo("nano:0.8b", 1, 900, true, false)]);
+    let req = BrainRequest::nuevo("hatboo", "chat", "hola").con_modelo("nano:0.8b");
+    let sonda = SondaFija {
+        libre: Some(1800),
+        total: Some(8450),
+        ..Default::default()
+    };
+    // Con el margen estrechado (8450/8 = 1056) 900 + 1056 = 1956 > 1800: no cabe,
+    // y el motivo tiene que hablar de 1056.
+    let err = elegir(&req, &lote(Level::N0, vec![]), &reg, &gov(), &sonda).unwrap_err();
+    let s = err.mensaje();
+    assert!(s.contains("1056") || s.contains("1956"), "{s}");
+    let consejo = gov().aconsejar(&sonda, &modelo("nano:0.8b", 1, 900, true, false), Level::N0);
+    assert!(!consejo.cabe, "{:?}", consejo);
+    assert!(
+        consejo.porque.contains("1056"),
+        "el consejo dice el margen de la spec, no el que usó: {}",
+        consejo.porque
+    );
+    assert!(
+        consejo.porque.contains("octava parte"),
+        "{}",
+        consejo.porque
+    );
+}
+
 #[test]
 fn local_only_nunca_propone_una_api() {
     let reg = Registry::nuevo(vec![
