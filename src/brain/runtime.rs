@@ -28,7 +28,7 @@ use crate::recovery::{classifier, escalator::Accion, Escalador};
 use crate::resources::{Governor, ResourceProbe};
 use crate::tools::{Deciso, Herramientas, Puerta};
 use crate::verification::{self, Candidato, Entorno as EntornoV, Lector, VerificationResult};
-use crate::brain::state::EstadoTarea;
+use crate::brain::state::{EstadoTarea, Etapa};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use std::sync::{Arc, Mutex};
@@ -230,6 +230,11 @@ impl Brain {
         let fast_path = (decision.source == crate::api::vocab::DecisionSource::FastPath)
             .then(|| decision.por_que.clone());
         let (pie, porque) = self.planificar(req, &decision).await?;
+        // Lo que el motor de contexto dejó fuera se prepara de verdad para poder
+        // decirlo. Estar `contexto_rechazado` fijo en `[]` era una traza que
+        // afirmaba que no sobró nada sin haberlo comprobado.
+        let estado = EstadoTarea::nuevo(req.message.clone());
+        let preparado = self.preparar(req, &pie.plan, &[], &estado)?;
         Ok(DecisionTrace {
             senales,
             fast_path,
@@ -237,7 +242,8 @@ impl Brain {
             modelo_elegido: pie.plan.model.clone(),
             porque_este: porque,
             descartados: pie.descartados.clone(),
-            contexto_rechazado: vec![],
+            contexto_rechazado: preparado.rechazado,
+            // `run` no corrió: no hubo ninguna recuperación que anotar.
             recuperacion: vec![],
         })
     }
@@ -316,6 +322,13 @@ impl Brain {
         // Sin esto el campo y el evento existían pero no los producía nadie.
         let mut hash_previo: Option<String> = None;
         let mut escalada_pendiente: Option<(Level, String)> = None;
+        // El estado de la tarea (§4 y §IX). Vive fuera del `plan_hash` a propósito:
+        // si entrara, cada paso invalidaría el plan. Antes se fabricaba uno nuevo
+        // dentro de `preparar` con solo el objetivo, así que la pieza `estado:tarea`
+        // del prompt nunca decía más que la frase del usuario y `cierre_ok()` no lo
+        // miraba nadie.
+        let mut estado = EstadoTarea::nuevo(req.message.clone());
+        estado.ir_a(Etapa::Perfilado);
 
         loop {
             if opts.cancelar.cancelado() {
@@ -385,7 +398,9 @@ impl Brain {
                     .unwrap_or(false),
             });
 
-            let preparado = self.preparar(req, &plan, &observaciones)?;
+            estado.ir_a(Etapa::Planificado);
+            let preparado = self.preparar(req, &plan, &observaciones, &estado)?;
+            estado.ir_a(Etapa::Preparado);
             if !preparado.residente && plan.execution_target == crate::api::vocab::ExecutionTarget::Local {
                 recargas += 1;
             }
@@ -395,6 +410,8 @@ impl Brain {
                 Err(e) => {
                     let clase = classifier::clasificar(&classifier::Origen::Error(&e));
                     ultima_clase = Some(clase);
+                    estado.anotar_fallo(clase);
+                    estado.ir_a(Etapa::Recuperando);
                     match escalador.decidir(clase) {
                         Accion::Reintentar { porque, intento, .. } => {
                             reintentos = intento;
@@ -426,6 +443,7 @@ impl Brain {
             // Se guarda la ronda por si el presupuesto de rondas se agota después:
             // mejor entregar esto marcado como sin verificar que tirar los minutos.
             ultima = Some((plan.clone(), g.clone(), preparado.clone()));
+            estado.ir_a(Etapa::Ejecutando);
 
             // Tools: se ejecutan lo que el Plan y el producto dejan; lo demás se
             // rechaza en código y **se le dice al modelo**, con motivo.
@@ -451,6 +469,16 @@ impl Brain {
                             }
                         ));
                     }
+                    // Y deja de una vez cómo quedó la tarea: lo ejecutado, lo que
+                    // espera aprobación y lo bloqueado con su motivo. Sin esto el
+                    // `estado:tarea` del prompt era siempre la frase del usuario.
+                    if c.ok {
+                        estado.completado.push(c.tool.clone());
+                    } else if c.resultado.is_none() {
+                        estado.pendiente.push(c.tool.clone());
+                    } else if let Some(motivo) = &c.resultado {
+                        estado.bloqueado.push((c.tool.clone(), motivo.clone()));
+                    }
                 }
                 if ronda.algo_se_ejecuto {
                     continue;
@@ -471,6 +499,8 @@ impl Brain {
                     };
                     let clase = classifier::clasificar(&origen);
                     ultima_clase = Some(clase);
+                    estado.anotar_fallo(clase);
+                    estado.ir_a(Etapa::Recuperando);
                     let porque = format!("{}: {}", decis.motivo(), classifier::motivo(&origen));
                     match escalador.decidir(clase) {
                         Accion::Reintentar {
@@ -518,6 +548,7 @@ impl Brain {
                 }));
             }
 
+            estado.ir_a(Etapa::Verificando);
             let verificacion = self.verificar_salida(req, &plan, &g.texto);
             self.emitir(
                 opts,
@@ -534,6 +565,19 @@ impl Brain {
             );
 
             if verificacion.es_pass() {
+                // §IX: el cierre de un N3 es determinista, no le pregunta al modelo
+                // si «se acabó». Con algo pendiente de aprobación no se vende como
+                // verificado-y-cerrado: se entrega como sin verificar y se dice por
+                // qué, que es lo que el panel necesita para no mentir.
+                let cerrado = plan.level != Level::N3 || estado.cierre_ok();
+                if cerrado {
+                    estado.ir_a(Etapa::Completado);
+                } else {
+                    recuperacion.push(format!(
+                        "N3 verificado pero sin cerrar: queda pendiente {}",
+                        estado.pendiente.join(", ")
+                    ));
+                }
                 return Ok(self.resultado(Cierre {
                     req,
                     plan: &plan,
@@ -541,7 +585,11 @@ impl Brain {
                     preparado: &preparado,
                     llamadas: vec![],
                     verificacion,
-                    status: OutputStatus::Verificado,
+                    status: if cerrado {
+                        OutputStatus::Verificado
+                    } else {
+                        OutputStatus::SinVerificar
+                    },
                     inicio,
                     reintentos,
                     recargas,
@@ -590,6 +638,8 @@ impl Brain {
                 _ => (FailureClass::Formato, "sin clase".to_string()),
             };
             ultima_clase = Some(clase);
+            estado.anotar_fallo(clase);
+            estado.ir_a(Etapa::Recuperando);
             match escalador.decidir(clase) {
                 Accion::Reintentar {
                     ajustes,
@@ -777,11 +827,15 @@ impl Brain {
         req: &BrainRequest,
         plan: &Plan,
         observaciones: &[String],
+        estado: &EstadoTarea,
     ) -> Result<Preparado, BrainError> {
-        let estado = EstadoTarea::nuevo(req.message.clone());
         let mut piezas =
             context::sources::piezas_de_seguridad(req, &approval_texto(req.approval_level));
-        piezas.extend(context::sources::piezas_del_pedido(&req.clone(), Some(&estado), None));
+        piezas.extend(context::sources::piezas_del_pedido(
+            req,
+            Some(estado),
+            None,
+        ));
         for (i, o) in observaciones.iter().enumerate().rev() {
             piezas.push(crate::context::Pieza::nueva(
                 Prioridad::Objetivo,

@@ -80,8 +80,13 @@ pub struct BrainResult {
 }
 
 impl BrainResult {
+    /// Éxito: el veredicto es `Pass` **y** la salida se entrega como cerrado. Los
+    /// dos, porque el runtime puede tener un `Pass` de un N3 al que le falta el
+    /// cierre (§IX: quedó una llamada esperando aprobación) y entonces entregar
+    /// `SinVerificar`. Dos señales que se contradigan es justo lo que el panel no
+    /// puede mostrar.
     pub fn es_exito(&self) -> bool {
-        self.verification.es_pass()
+        self.verification.es_pass() && self.output.status == OutputStatus::Verificado
     }
 }
 

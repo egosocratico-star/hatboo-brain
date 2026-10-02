@@ -713,3 +713,166 @@ async fn el_flag_de_verificacion_ejecucion_cambia_de_verdad_la_conducta() {
     assert_ne!(r_sin.output.status, OutputStatus::Verificado);
     assert!(!r_sin.es_exito());
 }
+
+/// El `EstadoTarea` ya no se fabrica dentro de `preparar` para tirarlo después: lo
+/// que hizo la ronda anterior entra en el prompt de la siguiente, y un bloqueo sin
+/// motivo impediría el cierre de un N3 (§IX: determinista, no le pregunta al
+/// modelo si «se acabó»).
+#[tokio::test]
+async fn el_estado_de_la_tarea_viaja_al_siguiente_prompt() {
+    /// `read_file` se ejecuta; `write_file` espera aprobación del producto.
+    struct UnaSiUnaNo;
+    #[async_trait::async_trait]
+    impl EjecutarTool for UnaSiUnaNo {
+        async fn ejecutar(&self, _: &String, _: &serde_json::Value) -> Result<String, String> {
+            Ok("CONTENIDO-42".into())
+        }
+        fn requiere_aprobacion(&self, tool: &String, _: &serde_json::Value) -> bool {
+            tool == "write_file"
+        }
+    }
+
+    let cfg = Cargada::leer(Some(&Path::new(env!("CARGO_MANIFEST_DIR")).join("config"))).unwrap();
+    let mock = Arc::new(MockProvider::nuevo(vec![modelo()]).con_nombre("ollama"));
+    mock.responde(GenerationResult {
+        tool_calls: vec![
+            hatboo_brain::providers::LlamadaTool {
+                tool: "read_file".into(),
+                args: serde_json::json!({ "path": "src/main.rs" }),
+            },
+            hatboo_brain::providers::LlamadaTool {
+                tool: "write_file".into(),
+                args: serde_json::json!({ "path": "src/main.rs" }),
+            },
+        ],
+        ..Default::default()
+    });
+    for _ in 0..4 {
+        mock.responde_texto("Un mutex protege datos compartidos.");
+    }
+    let montaje = Montaje {
+        proveedores: vec![mock.clone()],
+        registry: Registry::nuevo(vec![modelo()]),
+        reglas: cfg.reglas.clone(),
+        herramientas: cfg.herramientas.clone(),
+        sonda: Arc::new(SondaFija::default()),
+        contador: Arc::new(Estimador),
+        ejecutor_tools: Some(Arc::new(UnaSiUnaNo)),
+        lector: Some(Arc::new(|_: &str| None)),
+        ..Montaje::de_proveedor(mock.clone())
+    };
+    let brain = Brain::nuevo(montaje).unwrap();
+    let r = brain
+        .run(&pedido(
+            "Corrige el error de compilación de src/main.rs",
+            "work",
+            None,
+        ))
+        .await
+        .expect("hay salida que mostrar");
+    let peticiones = mock.peticiones();
+    assert!(
+        peticiones.len() >= 2,
+        "no hubo una segunda vuelta: {}",
+        peticiones.len()
+    );
+    let p2 = &peticiones[1].prompt;
+    assert!(p2.contains("Objetivo:"), "{p2}");
+    assert!(p2.contains("Hecho: read_file"), "el estado no viajó: {p2}");
+    assert!(
+        p2.contains("Pendiente: write_file"),
+        "el estado no viajó: {p2}"
+    );
+    assert!(!r.output.texto.is_empty(), "el turno terminó sin salida");
+}
+
+/// §IX con la puerta de cierre: un N3 puede tener el comando en verde y aun así
+/// dejar una llamada esperando aprobación. `Verificado` entonces sería mentira, y
+/// lo decide el crate, no un modelo al que se le pregunta si «se acabó».
+#[tokio::test]
+async fn un_n3_con_pendientes_no_se_vende_como_verificado() {
+    struct Aprobador;
+    #[async_trait::async_trait]
+    impl EjecutarTool for Aprobador {
+        async fn ejecutar(&self, _: &String, _: &serde_json::Value) -> Result<String, String> {
+            Ok("HECHO".into())
+        }
+        fn requiere_aprobacion(&self, tool: &String, _: &serde_json::Value) -> bool {
+            tool == "write_file"
+        }
+    }
+    struct Cero;
+    impl Ejecutor for Cero {
+        fn correr(&self, _: &str, _: &str, _: u32) -> Result<Salida, String> {
+            Ok(Salida {
+                codigo: 0,
+                stdout: "Finished".into(),
+                stderr: String::new(),
+                dur_ms: 40,
+            })
+        }
+    }
+
+    let reglas = hatboo_brain::decision::rules::Reglas::desde_json(
+        r#"{"version":1,"reglas":[{"id":"todo-a-n3",
+             "cuando":[{"senal":"message_length","op":">","valor":10}],
+             "entonces":{"intent":"explain","level":"N3","contrato":"markdown",
+                         "tools":["read_file","write_file"]}}]}"#,
+    )
+    .unwrap();
+    let cfg = Cargada::leer(Some(&Path::new(env!("CARGO_MANIFEST_DIR")).join("config"))).unwrap();
+    let mock = Arc::new(MockProvider::nuevo(vec![modelo()]).con_nombre("ollama"));
+    mock.responde(GenerationResult {
+        tool_calls: vec![
+            hatboo_brain::providers::LlamadaTool {
+                tool: "read_file".into(),
+                args: serde_json::json!({ "path": "src/main.rs" }),
+            },
+            hatboo_brain::providers::LlamadaTool {
+                tool: "write_file".into(),
+                args: serde_json::json!({ "path": "src/main.rs" }),
+            },
+        ],
+        ..Default::default()
+    });
+    for _ in 0..4 {
+        mock.responde_texto("La corrección está explicada abajo.");
+    }
+    let montaje = Montaje {
+        proveedores: vec![mock.clone()],
+        registry: Registry::nuevo(vec![modelo()]),
+        reglas,
+        herramientas: cfg.herramientas.clone(),
+        sonda: Arc::new(SondaFija::default()),
+        contador: Arc::new(Estimador),
+        ejecutor_tools: Some(Arc::new(Aprobador)),
+        ejecutor_comandos: Some(Arc::new(Cero)),
+        lector: Some(Arc::new(|_: &str| None)),
+        ..Montaje::de_proveedor(mock.clone())
+    };
+    let brain = Brain::nuevo(montaje).unwrap();
+    let r = brain
+        .run(&pedido(
+            "Corrige el error de compilación de src/main.rs",
+            "work",
+            Some("cargo check"),
+        ))
+        .await
+        .expect("hay salida que entregar");
+    assert_eq!(r.plan.level, Level::N3, "{:?}", r.plan);
+    assert_eq!(
+        r.verification,
+        VerificationResult::Pass,
+        "el comando sí dio 0: lo que falta es el cierre"
+    );
+    assert_ne!(
+        r.output.status,
+        OutputStatus::Verificado,
+        "con una llamada pendiente de aprobación no se cierra la tarea"
+    );
+    assert_eq!(r.output.status, OutputStatus::SinVerificar, "{:?}", r.output);
+    assert!(
+        !r.es_exito(),
+        "el éxito tiene que ser exactamente el Pass cerrado"
+    );
+}

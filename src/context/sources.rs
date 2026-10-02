@@ -1,25 +1,11 @@
-//! De dónde salen las piezas de contexto. El Brain no lee el disco: le pide al
-//! producto el contenido de lo que el usuario nombró (mismo sandbox, mismos
-//! permisos que ya tiene Hatboo).
+//! De dónde salen las piezas de contexto. El Brain no lee el disco: lo que hace
+//! falta del proyecto entra por el `Lector` que pone el producto en el `Montaje`
+//! (mismo sandbox, mismos permisos que ya tiene Hatboo) o por la
+//! `lectura_directa` de la decisión. Aquí se ensambla, no se lee.
 
 use super::{Pieza, Prioridad};
 use crate::api::request::BrainRequest;
 use crate::brain::state::EstadoTarea;
-
-/// El adaptador del producto lo implementa. `None` = no lo tienes (fuera del
-/// proyecto, sin permiso, o no existe).
-pub trait Fuentes: Send + Sync {
-    fn contenido(&self, origen: &str) -> Option<String>;
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct SinFuentes;
-
-impl Fuentes for SinFuentes {
-    fn contenido(&self, _origen: &str) -> Option<String> {
-        None
-    }
-}
 
 /// Piezas que se derivan solo del pedido, sin tocar el disco.
 pub fn piezas_del_pedido(
