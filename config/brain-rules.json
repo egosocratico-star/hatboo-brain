@@ -98,7 +98,7 @@
     "work": "N1"
   },
 
-  "umbral_duda": null,
+  "_umbral_nota": "El tope de la duda (§15.3, punto abierto del plan) NO es una clave de aquí: se pone por código con Motor::con_tope_de_duda y viene apagado. Estaba escrita `umbral_duda: null` que no leía nadie; fuera para que el JSON no ofrezca una perilla que no hace nada.",
 
   "reglas": [
     {

@@ -38,6 +38,15 @@ use std::sync::{Arc, Mutex};
 /// idénticas ya son un bucle).
 const MAX_RONDAS: u8 = 8;
 
+/// Si una tool escribe. Manda la declaración del producto para ESTE turno
+/// (`req.tools.es_write`); el catálogo del crate solo vale para lo que el producto
+/// no declaró. Con `unwrap_or(false)` del catálogo, una tool de escritura que no
+/// esté en `tools.json` no consumía presupuesto de escrituras y encima pasaba por
+/// lectura ante `policy::permiso`: se ejecutaba sin aprobación.
+fn es_escritura(req: &BrainRequest, catalogo: &Herramientas, id: &str) -> bool {
+    req.tools.es_write(id) || catalogo.escribe(id)
+}
+
 /// Lo que el producto ejecuta. El Brain administra cuándo y con qué presupuesto;
 /// el cómo, el dónde y el sandbox son del adaptador (§5 del plan).
 #[async_trait]
@@ -255,10 +264,13 @@ impl Brain {
         if decision.skip_generative
             && (decision.salida_directa.is_some() || decision.lectura_directa.is_some())
         {
-            return self.sin_generativo(&decision, inicio, opts);
+            return self.sin_generativo(&decision, inicio);
         }
 
-        let mut escalador = Escalador::nuevo(decision.level.reintentos().max(1));
+        // Los reintentos los fija el nivel, sin `max(1)`: un N0 que firma
+        // «Instantáneo» y 0 reintentos no puede gastar una segunda generación
+        // entera (y en CPU el segundo intento repaga el prefill completo).
+        let mut escalador = Escalador::nuevo(decision.level.reintentos());
         let mut observaciones: Vec<String> = Vec::new();
         let mut reintentos: u8 = 0;
         let mut recargas: u32 = 0;
@@ -745,10 +757,15 @@ impl Brain {
         opts: &OpcionesDeCorrida,
         consumo: (u32, u32),
     ) -> (Vec<ToolCall>, bool, (u32, u32)) {
-        let mut puerta = Puerta::nueva(plan, |t| self.herramientas.escribe(t)).con_consumo(
-            consumo.0,
-            consumo.1,
-        );
+        // Qué es una escritura lo decide el producto para ESTE turno
+        // (`req.tools.es_write`, que es la declaración que acompaña a sus tools) y,
+        // si el id no está en esa lista, el catálogo del crate. Antes se miraba
+        // solo el catálogo con `unwrap_or(false)`: una tool de escritura que
+        // Hatboo ofrece y `tools.json` no conoce no consumía presupuesto de
+        // escrituras y además pasaba por lectura ante `policy::permiso`, o sea se
+        // ejecutaba sin pedir aprobación.
+        let escribe = |t: &str| es_escritura(req, &self.herramientas, t);
+        let mut puerta = Puerta::nueva(plan, escribe).con_consumo(consumo.0, consumo.1);
         let mut out = Vec::new();
         let mut algo = false;
         for l in &g.tool_calls {
@@ -767,7 +784,7 @@ impl Brain {
                 .unwrap_or(true)
                 || matches!(
                     policy::permiso(
-                        self.herramientas.escribe(&l.tool),
+                        escribe(&l.tool),
                         req.approval_level,
                         plan.risk,
                         true,
@@ -847,6 +864,9 @@ impl Brain {
                 Some("es")
             },
             timeout_s: plan.timeout_s,
+            // El tope que el Plan firmó, no un 2048 de pega: es lo que convierte
+            // «el modelo no paró» en un Fail en N1 en vez de un Pass.
+            max_output_tokens: plan.max_output_tokens,
             // El Brain no escribe archivos: aplicar el parche en una copia y
             // correr el comando ahí le toca al producto. Sin eso el comando
             // comprueba el estado anterior, y `determinista` lo dice en vez de
@@ -937,7 +957,6 @@ impl Brain {
         &self,
         d: &DecisionResult,
         inicio: std::time::Instant,
-        opts: &OpcionesDeCorrida,
     ) -> Result<BrainResult, BrainError> {
         let pendientes: Vec<ToolCall> = d
             .lectura_directa
@@ -990,7 +1009,10 @@ impl Brain {
                 ..Default::default()
             },
         };
-        self.emitir(opts, BrainEvent::Completado(r.metrics.clone()));
+        // `Completado` lo emite `run_with` para cualquier `Ok`. Emitirlo también
+        // aquí mandaba dos finales por un turno de aritmética, y el motivo de
+        // centralizarlo era precisamente que el consumidor no se quede esperando
+        // un final que el Brain ya dio por cerrado.
         Ok(r)
     }
 

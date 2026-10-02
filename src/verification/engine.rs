@@ -18,6 +18,10 @@ pub struct Entorno<'a> {
     pub esquema: Option<&'a serde_json::Value>,
     pub idioma_pedido: Option<&'a str>,
     pub timeout_s: u32,
+    /// El tope de salida que firmó el Plan. La verificación de forma lo necesita:
+    /// sin él, `text::forma` comprobaría la longitud contra un 2048 de pega y un
+    /// N1 que pidió 512 tokens pasaría con 12.000 caracteres.
+    pub max_output_tokens: u32,
     /// Si el producto **ya aplicó** el parche que se está verificando sobre la
     /// raíz donde corre el comando. Con `false`, un `Pass` del comando dice que
     /// el proyecto compilaba antes del parche, no después: eso no es verificar
@@ -34,6 +38,7 @@ impl<'a> Default for Entorno<'a> {
             esquema: None,
             idioma_pedido: None,
             timeout_s: 60,
+            max_output_tokens: 2048,
             parche_aplicado: false,
         }
     }
@@ -101,7 +106,7 @@ fn determinista(c: &Candidato, e: &Entorno) -> Verdict {
 }
 
 fn forma(c: &Candidato, e: &Entorno) -> Verdict {
-    let base = text::forma(c.texto, c.contrato, 2048);
+    let base = text::forma(c.texto, c.contrato, e.max_output_tokens);
     if !matches!(base, Verdict::Pass) {
         return base;
     }

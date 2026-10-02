@@ -40,17 +40,24 @@ pub fn clasificar(o: &Origen) -> FailureClass {
                 ProviderError::TiempoFuera | ProviderError::Transporte(_) => {
                     FailureClass::Entorno
                 }
-                // Un 5xx es del proveedor; un 4xx de contexto largo es del plan.
+                // Un 5xx o un 429 son del proveedor; un 413, del plan. Lo que
+                // queda de 4xx NO es capacidad del modelo: un 401/403 es una clave
+                // que no sirve, un 404 es un modelo que no está en el plan (el
+                // caso real medido con Groq el 01-10) y un 400/422 es un cuerpo
+                // mal formado nuestro. Tratarlos de «capacidad» hacía subir de tier
+                // —en local, a un modelo más grande que no cabe en 8,45 GB— justo
+                // cuando subir de tier no arregla nada.
                 ProviderError::Status { codigo, .. } => {
-                    if *codigo >= 500 || *codigo == 429 {
-                        FailureClass::Entorno
-                    } else if *codigo == 413 {
+                    if *codigo == 413 {
                         FailureClass::Contexto
+                    } else if matches!(*codigo, 400 | 406 | 415 | 422) {
+                        FailureClass::Formato
                     } else {
-                        FailureClass::ModelCapability
+                        FailureClass::Entorno
                     }
                 }
-                ProviderError::RespuestaInvalida(_) => FailureClass::ModelCapability,
+                // El stream se cortó o no parsea: es el transporte, no el modelo.
+                ProviderError::RespuestaInvalida(_) => FailureClass::Entorno,
                 ProviderError::Cancelado | ProviderError::NoImplementado(_) => {
                     FailureClass::Entorno
                 }
@@ -104,10 +111,45 @@ mod tests {
 
     #[test]
     fn capacidad_es_lo_que_no_sabe_hacerse() {
-        let e = BrainError::Provider(ProviderError::RespuestaInvalida("corto".into()));
-        assert_eq!(clasificar(&Origen::Error(&e)), FailureClass::ModelCapability);
+        // `NoEligibleModel` es la única vía honesta a «hace falta otro modelo».
         let e2 = BrainError::NoEligibleModel;
         assert_eq!(clasificar(&Origen::Error(&e2)), FailureClass::ModelCapability);
+        // Un stream roto o un JSON que no parsea es del transporte: §XIV lo pone
+        // en el entorno. Antes caía en capacidad y subía el tier — en local, a un
+        // modelo más grande que no cabe en 8,45 GB — por culpa de la conexión.
+        let e = BrainError::Provider(ProviderError::RespuestaInvalida("corto".into()));
+        assert_eq!(clasificar(&Origen::Error(&e)), FailureClass::Entorno);
+    }
+
+    #[test]
+    fn un_4xx_de_autenticacion_no_pide_otro_modelo() {
+        // El caso real, medido el 01-10 con Groq: `llama-3.3-70b-versatile` no
+        // está en el plan gratuito y devuelve 404. Clasificarlo de capacidad hacía
+        // firmar un Plan con un modelo más grande, que en este equipo es RAM que
+        // no cabe. Lo mismo un 401/403 con la clave caducada.
+        for codigo in [401u16, 403, 404, 409, 410, 500, 503, 429] {
+            let e = BrainError::Provider(ProviderError::Status {
+                codigo,
+                cuerpo: "no".into(),
+            });
+            assert_eq!(
+                clasificar(&Origen::Error(&e)),
+                FailureClass::Entorno,
+                "HTTP {codigo}"
+            );
+        }
+        // Y un 400/422 es un cuerpo mal formado nuestro: contrato, no modelo.
+        for codigo in [400u16, 422] {
+            let e = BrainError::Provider(ProviderError::Status {
+                codigo,
+                cuerpo: "json malo".into(),
+            });
+            assert_eq!(
+                clasificar(&Origen::Error(&e)),
+                FailureClass::Formato,
+                "HTTP {codigo}"
+            );
+        }
     }
 
     #[test]

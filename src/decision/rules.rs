@@ -133,8 +133,6 @@ pub struct Reglas {
     /// Suelo de nivel por modo. Un `work` no puede caer a N0 con una tool de más.
     #[serde(default)]
     pub suelo_por_modo: std::collections::BTreeMap<String, Level>,
-    #[serde(default)]
-    pub umbral_duda: Option<f32>,
 }
 
 impl Default for Reglas {
@@ -154,7 +152,6 @@ impl Default for Reglas {
             menciona_archivos: Vec::new(),
             menciona_comando: Vec::new(),
             suelo_por_modo: Default::default(),
-            umbral_duda: None,
         }
     }
 }
@@ -170,12 +167,19 @@ pub enum ReglaError {
     SenalDesconocida(String),
     #[error("la regla usa un operador que no existe: {0}")]
     OperadorDesconocido(String),
+    /// Una regla sin condiciones se cumple siempre (cuantificación vacía) y ganaba
+    /// por `prio`, así que dejarla pasar es entregar el routing a una línea de JSON.
+    #[error("la regla «{0}» no tiene ninguna condición: ganaría siempre con confianza de certeza")]
+    ReglaSinCondiciones(String),
 }
 
 impl Reglas {
     pub fn desde_json(texto: &str) -> Result<Reglas, ReglaError> {
         let r: Reglas = serde_json::from_str(texto).map_err(|e| ReglaError::Json(e.to_string()))?;
         for regla in &r.reglas {
+            if regla.cuando.is_empty() {
+                return Err(ReglaError::ReglaSinCondiciones(regla.id.clone()));
+            }
             for c in &regla.cuando {
                 if crate::api::vocab::Signals::default().valor(&c.senal).is_none() {
                     return Err(ReglaError::SenalDesconocida(c.senal.clone()));
@@ -271,11 +275,11 @@ impl Reglas {
         }
         empates.sort_by_key(|(_, p)| -*p);
         let (ganadora, puntos) = empates[0];
-        let segunda = if ganadora.cuando.is_empty() {
-            None
-        } else {
-            empates.get(1).copied()
-        };
+        // La segunda candidatura se mira siempre. Antes se anulaba si la ganadora
+        // no tenía condiciones, y eso valía un 1,0 de confianza: el Engine se
+        // saltaba los efectos de la duda y la caché guardaba el resultado como
+        // cierto. Una regla que no pide nada no sabe más que las demás.
+        let segunda = empates.get(1).copied();
         let confianza = match segunda {
             Some((_, p2)) => Confidence::margen(puntos as f32, p2 as f32),
             None => Confidence::determinista(),
@@ -416,6 +420,19 @@ mod tests {
         assert_eq!(
             Reglas::desde_json(mal),
             Err(ReglaError::OperadorDesconocido("cerca".into()))
+        );
+    }
+
+    #[test]
+    fn una_regla_sin_condiciones_es_un_error_de_config() {
+        // `cuando: []` se cumple por cuantificación vacía: con `prio` ganaría
+        // siempre, y al no haber segunda candidatura la confianza salía en 1,0,
+        // con lo que el Engine se saltaba los efectos de la duda y la caché lo
+        // guardaba como cierto.
+        let mal = r#"{"version":1,"reglas":[{"id":"todas","cuando":[],"entonces":{"level":"N0"}}]}"#;
+        assert_eq!(
+            Reglas::desde_json(mal),
+            Err(ReglaError::ReglaSinCondiciones("todas".into()))
         );
     }
 

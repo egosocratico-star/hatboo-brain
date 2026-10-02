@@ -63,9 +63,11 @@ fn cada_clase_sale_de_su_origen() {
     );
     assert_eq!(
         clasificar(&Origen::Error(&BrainError::Provider(
+            // El stream se cortó: es el entorno, no el modelo. Ver el test de
+            // `capacidad_es_lo_que_no_sabe_hacerse` en el lib.
             ProviderError::RespuestaInvalida("json roto".into())
         ))),
-        F::ModelCapability
+        F::Entorno
     );
     assert_eq!(
         clasificar(&Origen::Error(&BrainError::NoEligibleModel)),

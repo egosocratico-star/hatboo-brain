@@ -44,9 +44,11 @@ pub fn forma(texto: &str, contrato: OutputContract, max_tokens: u32) -> Verdict 
             motivo: "no tiene cabeceras de archivo, no es un parche".into(),
         });
     }
-    // Longitud razonable frente al tope pedido: si se pasó muchísimo, el modelo
-    // no paró y hay que reintentar con contrato.
-    if t.chars().count() as u32 > max_tokens * 6 {
+    // Longitud razonable frente al tope que firmó el Plan. `Estimador` cuenta
+    // ≈3,5 caracteres por token (§prompt); el doble de eso ya no es un modelo que
+    // paró tarde, es un modelo que no paró, y en esta máquina cada uno de esos
+    // caracteres se paga en decodificación.
+    if t.chars().count() as u32 > max_tokens.saturating_mul(7) {
         return Verdict::Fail(Fallo {
             clase: FailureClass::Formato,
             motivo: format!(

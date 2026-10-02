@@ -54,6 +54,41 @@ fn cand(texto: &str, contrato: OutputContract) -> Candidato<'_> {
     }
 }
 
+/// La verificación de forma tiene que medir la longitud contra el tope que firmó
+/// EL Plan. `Entorno` no tenía ese campo y `text::forma` recibía un 2048 fijo, así
+/// que un N1 de 512 tokens pasaba con ~12.000 caracteres: nadie comprobaba el
+/// contrato de salida, y en esta máquina cada uno de esos caracteres se paga en
+/// decodificación (~17 tok/s).
+#[test]
+fn la_forma_mide_contra_el_tope_del_plan() {
+    let largo = "ta ".repeat(1300); // ~3.900 caracteres
+    let c = cand(&largo, OutputContract::Texto);
+    let holgado = Entorno {
+        max_output_tokens: 4096,
+        ..Default::default()
+    };
+    assert!(
+        matches!(
+            verificar(VerificationMode::Formato, &c, &holgado),
+            VerificationResult::Pass
+        ),
+        "un tope de N2 tiene que dejar una salida de ese tamaño"
+    );
+    match verificar(
+        VerificationMode::Formato,
+        &c,
+        &Entorno {
+            max_output_tokens: 512,
+            ..Default::default()
+        },
+    ) {
+        VerificationResult::Fail { motivo, .. } => {
+            assert!(motivo.contains("512"), "{motivo}");
+        }
+        otro => panic!("debía fallar contra el tope del plan: {otro:?}"),
+    }
+}
+
 #[test]
 fn los_tres_veredictos_salen_como_estan_en_el_canon() {
     let e = Entorno::default();
