@@ -53,19 +53,19 @@ mod tests {
     use crate::prompt::{Identidad, build_system, Estimador};
 
     fn plan() -> Plan {
-        Plan::firmar(
-            crate::api::vocab::Level::N2,
-            crate::api::vocab::Intent::Modify,
-            "gemma3:1b".into(),
-            "ollama".into(),
-            crate::api::vocab::ExecutionTarget::Local,
-            4096,
-            crate::api::vocab::ThinkingLevel::Off,
-            vec!["read_file".into()],
-            crate::api::vocab::OutputContract::Patch,
-            crate::api::vocab::VerificationMode::Determinista,
-            "prueba".into(),
-        )
+        Plan::firmar(crate::planner::plan::Firma {
+            level: crate::api::vocab::Level::N2,
+            intent: crate::api::vocab::Intent::Modify,
+            model: "gemma3:1b".into(),
+            provider: "ollama".into(),
+            execution_target: crate::api::vocab::ExecutionTarget::Local,
+            num_ctx: 4096,
+            thinking: crate::api::vocab::ThinkingLevel::Off,
+            tools: vec!["read_file".into()],
+            output_contract: crate::api::vocab::OutputContract::Patch,
+            verification: crate::api::vocab::VerificationMode::Determinista,
+            reason: "prueba".into(),
+        })
     }
 
     #[test]

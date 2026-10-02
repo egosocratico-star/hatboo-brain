@@ -204,6 +204,7 @@ mod tests {
     use super::*;
     use crate::api::vocab::{Intent, OutputContract, Profile};
     use crate::models::ModelInfo;
+    use crate::planner::plan::Firma;
 
     fn modelo() -> ModelInfo {
         ModelInfo {
@@ -224,19 +225,19 @@ mod tests {
     }
 
     fn plan_ok() -> Plan {
-        Plan::firmar(
-            Level::N1,
-            Intent::Ask,
-            "gemma3:1b".into(),
-            "ollama".into(),
-            ExecutionTarget::Local,
-            2048,
-            ThinkingLevel::Off,
-            vec![],
-            OutputContract::Texto,
-            VerificationMode::Formato,
-            "motivo".into(),
-        )
+        Plan::firmar(Firma {
+            level: Level::N1,
+            intent: Intent::Ask,
+            model: "gemma3:1b".into(),
+            provider: "ollama".into(),
+            execution_target: ExecutionTarget::Local,
+            num_ctx: 2048,
+            thinking: ThinkingLevel::Off,
+            tools: vec![],
+            output_contract: OutputContract::Texto,
+            verification: VerificationMode::Formato,
+            reason: "motivo".into(),
+        })
     }
 
     #[test]

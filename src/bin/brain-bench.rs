@@ -774,9 +774,16 @@ async fn main() {
     }
 
     let ejecutor = Arc::new(ComandoReal::default());
+    let eq = Equipo {
+        opts: &opts,
+        config: &config,
+        ollama: &ollama,
+        sonda: &sonda,
+        ejecutor: &ejecutor,
+    };
     let mut todas: Vec<Corrida> = Vec::new();
     for modelo in &modelos {
-        match corre_suite(modelo, &entradas, &opts, &config, &ollama, &sonda, &ejecutor).await {
+        match corre_suite(modelo, &entradas, &eq).await {
             Ok(v) => todas.extend(v),
             Err(e) => eprintln!("[{modelo}] se paró: {e}"),
         }
@@ -800,16 +807,25 @@ async fn main() {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+
+/// Lo que la suite monta una vez y le pasa a cada corrida. Eran cinco parámetros
+/// que viajaban siempre juntos por tres funciones; agrupados, ninguna firma
+/// necesita un `#[allow]` de los argumentos.
+struct Equipo<'a> {
+    opts: &'a Opciones,
+    config: &'a Cargada,
+    ollama: &'a Arc<OllamaProvider>,
+    sonda: &'a Arc<SondaReal>,
+    ejecutor: &'a Arc<ComandoReal>,
+}
+
 async fn corre_suite(
     modelo: &str,
     entradas: &[&Entrada],
-    opts: &Opciones,
-    config: &Cargada,
-    ollama: &Arc<OllamaProvider>,
-    sonda: &Arc<SondaReal>,
-    ejecutor: &Arc<ComandoReal>,
+    eq: &Equipo<'_>,
 ) -> Result<Vec<Corrida>, String> {
+    // `sonda` y `ejecutor` no se usan aquí: viajan dentro de `eq` hasta la corrida.
+    let Equipo { opts, config, ollama, .. } = *eq;
     let ficha = match ficha_de(config, ollama, modelo).await {
         Some(f) => f,
         None => {
@@ -845,7 +861,7 @@ async fn corre_suite(
                     continue;
                 }
             }
-            match una_corrida(e, rep, &raiz, opts, config, ollama, sonda, ejecutor, &registry, modelo).await {
+            match una_corrida(e, rep, &raiz, eq, &registry, modelo).await {
                 Ok(c) => {
                     println!(
                         "  rep {rep:>2} · {:<3} {:>6} ms · {:>5} tok · {:<13} {}{}",
@@ -943,19 +959,16 @@ fn pedido_de(e: &Entrada, config: &Cargada, raiz: &Path, modelo: &str) -> BrainR
     req
 }
 
-#[allow(clippy::too_many_arguments)]
+
 async fn una_corrida(
     e: &Entrada,
     rep: u32,
     raiz: &Path,
-    opts: &Opciones,
-    config: &Cargada,
-    ollama: &Arc<OllamaProvider>,
-    sonda: &Arc<SondaReal>,
-    ejecutor: &Arc<ComandoReal>,
+    eq: &Equipo<'_>,
     registry: &Registry,
     modelo: &str,
 ) -> Result<Corrida, String> {
+    let Equipo { opts, config, ollama, sonda, ejecutor } = *eq;
     let modo = modo_de(e);
     let con_fixture = e.fixture.is_some();
     let req = pedido_de(e, config, raiz, modelo);

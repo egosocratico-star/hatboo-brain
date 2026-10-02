@@ -1203,19 +1203,19 @@ impl Brain {
         // subía a N1 —o a N2 en modo trabajo— una decisión N0 que además no
         // llama a ningún modelo, y con eso el registro y la precisión de nivel
         // del arnés decían otra cosa.
-        let mut plan = Plan::firmar(
-            d.level,
-            d.intent,
-            "sin-modelo".into(),
-            "ninguno".into(),
-            ExecutionTarget::Local,
-            d.level.num_ctx_minimo(),
-            ThinkingLevel::Off,
-            vec![],
-            d.output_contract,
-            d.verification,
-            d.por_que.clone(),
-        );
+        let mut plan = Plan::firmar(crate::planner::plan::Firma {
+            level: d.level,
+            intent: d.intent,
+            model: "sin-modelo".into(),
+            provider: "ninguno".into(),
+            execution_target: ExecutionTarget::Local,
+            num_ctx: d.level.num_ctx_minimo(),
+            thinking: ThinkingLevel::Off,
+            tools: vec![],
+            output_contract: d.output_contract,
+            verification: d.verification,
+            reason: d.por_que.clone(),
+        });
         plan.risk = d.risk;
         // 2048 es el suelo con el que la invariante de presupuesto de §11 se
         // sostiene sin proveedor delante.

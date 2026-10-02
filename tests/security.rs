@@ -19,19 +19,19 @@ use hatboo_brain::tools::{Deciso, Herramientas, Puerta};
 use hatboo_brain::verification::patch::dentro_de;
 
 fn plan_con(tools: &[&str]) -> Plan {
-    let mut p = Plan::firmar(
-        Level::N2,
-        Intent::Modify,
-        "gemma3:1b".into(),
-        "ollama".into(),
-        ExecutionTarget::Local,
-        4096,
-        ThinkingLevel::Off,
-        tools.iter().map(|t| t.to_string()).collect(),
-        OutputContract::Patch,
-        VerificationMode::Determinista,
-        "prueba".into(),
-    );
+    let mut p = Plan::firmar(hatboo_brain::planner::plan::Firma {
+        level: Level::N2,
+        intent: Intent::Modify,
+        model: "gemma3:1b".into(),
+        provider: "ollama".into(),
+        execution_target: ExecutionTarget::Local,
+        num_ctx: 4096,
+        thinking: ThinkingLevel::Off,
+        tools: tools.iter().map(|t| t.to_string()).collect(),
+        output_contract: OutputContract::Patch,
+        verification: VerificationMode::Determinista,
+        reason: "prueba".into(),
+    });
     p.max_tool_calls = 3;
     p.max_write_actions = 1;
     p

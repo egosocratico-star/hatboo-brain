@@ -45,19 +45,19 @@ fn contexto<'a>(tools: &'a [String], modelos: &'a [ModelInfo]) -> PlanContext<'a
 }
 
 fn plan_de_prueba() -> Plan {
-    let mut p = Plan::firmar(
-        Level::N2,
-        Intent::Modify,
-        "gemma3:1b".into(),
-        "ollama".into(),
-        ExecutionTarget::Local,
-        4096,
-        ThinkingLevel::Off,
-        vec!["read_file".into(), "write_file".into()],
-        OutputContract::Patch,
-        VerificationMode::Determinista,
-        "prueba".into(),
-    );
+    let mut p = Plan::firmar(hatboo_brain::planner::plan::Firma {
+        level: Level::N2,
+        intent: Intent::Modify,
+        model: "gemma3:1b".into(),
+        provider: "ollama".into(),
+        execution_target: ExecutionTarget::Local,
+        num_ctx: 4096,
+        thinking: ThinkingLevel::Off,
+        tools: vec!["read_file".into(), "write_file".into()],
+        output_contract: OutputContract::Patch,
+        verification: VerificationMode::Determinista,
+        reason: "prueba".into(),
+    });
     p.system_tokens = 200;
     p
 }

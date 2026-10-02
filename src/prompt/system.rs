@@ -46,7 +46,6 @@ Si no puedes verificar algo, dilo; no des una respuesta por buena sin comprobaci
 
 /// El system prompt completo, capa por capa. `None` en `hatboo_md` = el producto
 /// no lo aprobó, y no entra.
-#[allow(clippy::too_many_arguments)]
 pub fn capas(
     identidad: &Identidad,
     modo: &str,

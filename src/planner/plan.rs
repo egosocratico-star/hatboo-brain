@@ -72,44 +72,51 @@ pub struct Plan {
     pub risk: Risk,
 }
 
+/// Lo que hay que decidir para firmar un Plan. Eran once argumentos de posición en
+/// `Plan::firmar` —con dos `String` pegados, un `u32` y tres enums del mismo
+/// aspecto—, o sea un sitio donde intercambiar orden sin que el compilador se
+/// enterara. Con un solo parámetro con nombre, cada constructor dice lo que pone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Firma {
+    pub level: Level,
+    pub intent: Intent,
+    pub model: ModelId,
+    pub provider: ProviderId,
+    pub execution_target: ExecutionTarget,
+    pub num_ctx: u32,
+    pub thinking: ThinkingLevel,
+    pub tools: Vec<ToolId>,
+    pub output_contract: OutputContract,
+    pub verification: VerificationMode,
+    pub reason: String,
+}
+
 impl Plan {
     /// El Plan no se construye a mano: se firma. Este es el único constructor
     /// razonable y obliga a pasar por `validate_plan()`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn firmar(
-        level: Level,
-        intent: Intent,
-        model: ModelId,
-        provider: ProviderId,
-        execution_target: ExecutionTarget,
-        num_ctx: u32,
-        thinking: ThinkingLevel,
-        tools: Vec<ToolId>,
-        output_contract: OutputContract,
-        verification: VerificationMode,
-        reason: String,
-    ) -> Plan {
+    pub fn firmar(f: Firma) -> Plan {
         Plan {
             schema_version: SCHEMA_VERSION,
-            level,
-            intent,
-            model,
-            provider,
-            execution_target,
-            num_ctx,
+            level: f.level,
+            intent: f.intent,
+            model: f.model,
+            provider: f.provider,
+            execution_target: f.execution_target,
+            num_ctx: f.num_ctx,
             keep_alive: KeepAlive::PorDefecto,
-            thinking,
-            max_output_tokens: default_max_output(level),
-            context_budget_tokens: default_context_budget(level),
-            tools,
-            max_tool_calls: default_max_tool_calls(level),
-            max_write_actions: default_max_writes(level),
-            timeout_s: default_timeout_s(level),
-            output_contract,
-            verification,
-            max_retries: level.reintentos(),
+            thinking: f.thinking,
+            max_output_tokens: default_max_output(f.level),
+            context_budget_tokens: default_context_budget(f.level),
+            tools: f.tools,
+            max_tool_calls: default_max_tool_calls(f.level),
+            max_write_actions: default_max_writes(f.level),
+            timeout_s: default_timeout_s(f.level),
+            output_contract: f.output_contract,
+            verification: f.verification,
+            max_retries: f.level.reintentos(),
             escalate_to: None,
-            reason,
+            reason: f.reason,
             plan_hash: None,
             parent_plan_hash: None,
             system_tokens: 0,
@@ -150,19 +157,19 @@ impl Plan {
     pub fn seguro(mode: &str, model: ModelId, provider: ProviderId, tools: Vec<ToolId>) -> Plan {
         let trabajo = mode == crate::api::vocab::Mode::WORK;
         let level = if trabajo { Level::N2 } else { Level::N1 };
-        let mut p = Plan::firmar(
+        let mut p = Plan::firmar(Firma {
             level,
-            Intent::Ask,
+            intent: Intent::Ask,
             model,
             provider,
-            ExecutionTarget::Local,
-            level.num_ctx_minimo(),
-            ThinkingLevel::Off,
-            if level.permite_tools() { tools } else { vec![] },
-            OutputContract::Texto,
-            level.verificacion_minima(),
-            "el plan pedido era inválido; se firmó el plan seguro".into(),
-        );
+            execution_target: ExecutionTarget::Local,
+            num_ctx: level.num_ctx_minimo(),
+            thinking: ThinkingLevel::Off,
+            tools: if level.permite_tools() { tools } else { vec![] },
+            output_contract: OutputContract::Texto,
+            verification: level.verificacion_minima(),
+            reason: "el plan pedido era inválido; se firmó el plan seguro".into(),
+        });
         p.schema_version = SCHEMA_VERSION;
         p
     }
@@ -231,19 +238,19 @@ mod tests {
     use super::*;
 
     fn plan(n: Level) -> Plan {
-        Plan::firmar(
-            n,
-            Intent::Ask,
-            "gemma3:1b".into(),
-            "ollama".into(),
-            ExecutionTarget::Local,
-            n.num_ctx_minimo(),
-            ThinkingLevel::Off,
-            vec![],
-            OutputContract::Texto,
-            n.verificacion_minima(),
-            "prueba".into(),
-        )
+        Plan::firmar(Firma {
+            level: n,
+            intent: Intent::Ask,
+            model: "gemma3:1b".into(),
+            provider: "ollama".into(),
+            execution_target: ExecutionTarget::Local,
+            num_ctx: n.num_ctx_minimo(),
+            thinking: ThinkingLevel::Off,
+            tools: vec![],
+            output_contract: OutputContract::Texto,
+            verification: n.verificacion_minima(),
+            reason: "prueba".into(),
+        })
     }
 
     #[test]

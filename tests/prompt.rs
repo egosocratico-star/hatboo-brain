@@ -127,19 +127,19 @@ fn dentro_devuelve_los_tags_a_texto_sin_dejar_de_ser_legible() {
 }
 
 fn plan_con(contexto: u32, thinking: hatboo_brain::api::vocab::ThinkingLevel) -> Plan {
-    let mut p = Plan::firmar(
-        Level::N2,
-        Intent::Ask,
-        "gemma3:1b".into(),
-        "ollama".into(),
-        ExecutionTarget::Local,
-        4096,
+    let mut p = Plan::firmar(hatboo_brain::planner::plan::Firma {
+        level: Level::N2,
+        intent: Intent::Ask,
+        model: "gemma3:1b".into(),
+        provider: "ollama".into(),
+        execution_target: ExecutionTarget::Local,
+        num_ctx: 4096,
         thinking,
-        vec![],
-        OutputContract::Texto,
-        VerificationMode::Determinista,
-        "prueba".into(),
-    );
+        tools: vec![],
+        output_contract: OutputContract::Texto,
+        verification: VerificationMode::Determinista,
+        reason: "prueba".into(),
+    });
     p.context_budget_tokens = contexto;
     p
 }
