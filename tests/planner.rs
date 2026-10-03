@@ -29,6 +29,7 @@ fn modelo(id: &str, razona: bool) -> ModelInfo {
         supports_tools: true,
         supports_thinking: razona,
         supports_vision: false,
+        structured_output: false,
         disco_mb: Some(800),
     }
 }

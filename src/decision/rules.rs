@@ -89,6 +89,11 @@ fn default_conjuncion() -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Reglas {
     pub version: u32,
+    /// Los pesos de la decisión ponderada por costo (§3). No salen de este JSON:
+    /// viven en `tuning.json`, y aquí llegan por `con_tuning`. Sin fichero están a
+    /// 1,0 y la elección sale idéntica a la de siempre.
+    #[serde(skip, default = "crate::decision::tuning::Tuning::neutral")]
+    pub tuning: crate::decision::tuning::Tuning,
     #[serde(default)]
     pub reglas: Vec<Regla>,
     /// Los saludos que el Fast Path resuelve sin modelo.
@@ -152,6 +157,7 @@ impl Default for Reglas {
             menciona_archivos: Vec::new(),
             menciona_comando: Vec::new(),
             suelo_por_modo: Default::default(),
+            tuning: crate::decision::tuning::Tuning::neutral(),
         }
     }
 }
@@ -174,6 +180,14 @@ pub enum ReglaError {
 }
 
 impl Reglas {
+    /// Le pone los pesos con los que se elige entre candidaturas (§3). Se llama
+    /// desde el cargador cuando existe `config/tuning.json`; sin llamada, manda la
+    /// puntuación a secas.
+    pub fn con_tuning(mut self, t: crate::decision::tuning::Tuning) -> Reglas {
+        self.tuning = t;
+        self
+    }
+
     pub fn desde_json(texto: &str) -> Result<Reglas, ReglaError> {
         let r: Reglas = serde_json::from_str(texto).map_err(|e| ReglaError::Json(e.to_string()))?;
         for regla in &r.reglas {
@@ -274,7 +288,26 @@ impl Reglas {
             return Ok(None);
         }
         empates.sort_by_key(|(_, p)| -*p);
-        let (ganadora, puntos) = empates[0];
+        // La confianza se mide siempre sobre la puntuación cruda (§1: el margen
+        // entre la primera y la segunda), no sobre el costo ponderado.
+        let puntos = empates[0].1;
+        // §3 del Plan v1.3: entre candidaturas manda `argmax p(nivel) ×
+        // peso(nivel, riesgo)`. Con los pesos neutros (todos a 1,0) el ganador es
+        // el de la puntuación, o sea: la conducta medida hasta hoy.
+        let candidatas: Vec<(usize, crate::api::vocab::Level, crate::api::vocab::Risk, i32)> = empates
+            .iter()
+            .enumerate()
+            .map(|(i, (r, p))| {
+                (
+                    i,
+                    r.entonces.level.unwrap_or(crate::api::vocab::Level::N1),
+                    r.entonces.risk.unwrap_or(crate::api::vocab::Risk::Low),
+                    *p,
+                )
+            })
+            .collect();
+        let elegida = self.tuning.elegir(&candidatas).map(|(i, _)| i).unwrap_or(0);
+        let (ganadora, _) = empates[elegida];
         // La segunda candidatura se mira siempre. Antes se anulaba si la ganadora
         // no tenía condiciones, y eso valía un 1,0 de confianza: el Engine se
         // saltaba los efectos de la duda y la caché guardaba el resultado como
@@ -459,5 +492,49 @@ mod tests {
         assert_eq!(d.risk, Risk::High);
         let subido = d.con_suelo_de_riesgo();
         assert!(subido.level >= Level::N2);
+    }
+
+    /// §3 del Plan v1.3: la elección entre candidaturas es `argmax p × peso`. Con
+    /// pesos neutros tiene que salir la de siempre; con el nivel barato pesado, la
+    /// otra. Sin esto el `tuning.json` sería un adorno que nadie lee.
+    #[test]
+    fn los_pesos_eligen_entre_dos_candidatas() {
+        let r = Reglas::desde_json(
+            r#"{"version":1,"reglas":[
+                {"id":"cara","prio":40,"cuando":[{"senal":"has_code","op":"==","valor":true}],
+                 "entonces":{"intent":"modify","level":"N3","risk":"low"}},
+                {"id":"barata","prio":20,"cuando":[{"senal":"has_code","op":"==","valor":true}],
+                 "entonces":{"intent":"modify","level":"N2","risk":"low"}}
+            ]}"#,
+        )
+        .unwrap();
+        let s = Signals {
+            has_code: true,
+            message_length: 40,
+            ..Default::default()
+        };
+        let hs: Vec<ToolId> = vec![];
+
+        let (d, _) = r.candidatar(&s, "es", &hs).unwrap().expect("candidatura");
+        assert_eq!(d.level, Level::N3, "sin pesos manda la puntuación de siempre");
+        assert!(d.por_que.contains("cara"), "por_que: {}", d.por_que);
+
+        let mut caro_quedarse_corto = std::collections::BTreeMap::new();
+        let mut por_riesgo = std::collections::BTreeMap::new();
+        por_riesgo.insert("low".to_string(), 3.0);
+        caro_quedarse_corto.insert("N2".to_string(), por_riesgo);
+        let con_pesos = r.con_tuning(crate::decision::tuning::Tuning {
+            pesos: caro_quedarse_corto,
+        });
+        let (d2, _) = con_pesos
+            .candidatar(&s, "es", &hs)
+            .unwrap()
+            .expect("candidatura");
+        assert_eq!(
+            d2.level,
+            Level::N2,
+            "con el nivel barato ponderado al triple tiene que ganar esa regla"
+        );
+        assert!(d2.por_que.contains("barata"), "por_que: {}", d2.por_que);
     }
 }

@@ -121,6 +121,7 @@ mod tests {
             supports_tools: true,
             supports_thinking: false,
             supports_vision: false,
+            structured_output: false,
             disco_mb: Some(815),
         }]
     }
@@ -143,6 +144,7 @@ mod tests {
             ejecutor_tools: None,
             ejecutor_comandos: None,
             lector: None,
+            decisiones: None,
             consentimiento_api: false,
         };
         (mock, Brain::nuevo(montaje).unwrap())

@@ -38,6 +38,7 @@ fn modelo() -> ModelInfo {
         supports_tools: true,
         supports_thinking: false,
         supports_vision: false,
+        structured_output: false,
         disco_mb: Some(815),
     }
 }
@@ -885,4 +886,86 @@ async fn un_n3_con_pendientes_no_se_vende_como_verificado() {
         !r.es_exito(),
         "el éxito tiene que ser exactamente el Pass cerrado"
     );
+}
+
+/// El almacén del producto, en miniatura: guarda lo que le entregan.
+#[derive(Clone, Default)]
+struct Coleccion(Arc<std::sync::Mutex<Vec<hatboo_brain::observability::RegistroDecision>>>);
+
+impl hatboo_brain::observability::SinkDecisiones for Coleccion {
+    fn guarda(&self, r: &hatboo_brain::observability::RegistroDecision) {
+        self.0.lock().unwrap().push(r.clone());
+    }
+}
+
+/// §15.9: el dataset de decisiones es **opt-in**, y lo que guarda sale redactado.
+/// La prueba no es que exista la línea: es que la clave que escribió el usuario
+/// no esté en ella, y que con la bandera apagada no se guarde nada.
+#[tokio::test]
+async fn el_dataset_de_decisiones_es_opt_in_y_sale_redactado() {
+    let cfg = Cargada::leer(Some(&Path::new(env!("CARGO_MANIFEST_DIR")).join("config"))).unwrap();
+    let clave = "sk-ant-0123456789ABCDEFGHIJKLMN";
+    let pedido_clave = BrainRequest::nuevo(
+        "hatboo",
+        "chat",
+        format!("usa la clave {clave} y dime si está bien formada"),
+    );
+
+    // Apagado por defecto, con almacén puesto: no se guarda nada.
+    let sin_bandera = Coleccion::default();
+    // `con_nombre("ollama")`: el registry dice `provider: "ollama"` y el `id()`
+    // del proveedor tiene que coincidir, si no `validate_plan` corta con
+    // `ProviderNotAllowed`.
+    let mock = Arc::new(MockProvider::nuevo(vec![modelo()]).con_nombre("ollama"));
+    mock.responde_texto("está bien formada");
+    let brain = Brain::nuevo(Montaje {
+        proveedores: vec![mock.clone()],
+        registry: Registry::nuevo(vec![modelo()]),
+        reglas: cfg.reglas.clone(),
+        herramientas: cfg.herramientas.clone(),
+        sonda: Arc::new(SondaFija::default()),
+        decisiones: Some(Arc::new(sin_bandera.clone())),
+        ..Montaje::de_proveedor(mock.clone())
+    })
+    .unwrap();
+    brain.run_with(&pedido_clave, hatboo_brain::brain::OpcionesDeCorrida::nueva()).await.unwrap();
+    assert!(sin_bandera.0.lock().unwrap().is_empty(), "el default es no guardar nada");
+
+    // Encendido: una línea por turno, con la clave fuera del texto.
+    let con_bandera = Coleccion::default();
+    let mock = Arc::new(MockProvider::nuevo(vec![modelo()]).con_nombre("ollama"));
+    mock.responde_texto("está bien formada");
+    let mut montaje = Montaje {
+        proveedores: vec![mock.clone()],
+        registry: Registry::nuevo(vec![modelo()]),
+        reglas: cfg.reglas.clone(),
+        herramientas: cfg.herramientas.clone(),
+        sonda: Arc::new(SondaFija::default()),
+        decisiones: Some(Arc::new(con_bandera.clone())),
+        ..Montaje::de_proveedor(mock.clone())
+    };
+    montaje.config.flags.record_decisiones = true;
+    let brain = Brain::nuevo(montaje).unwrap();
+    let r = brain
+        .run_with(&pedido_clave, hatboo_brain::brain::OpcionesDeCorrida::nueva())
+        .await
+        .unwrap();
+    let guardadas = con_bandera.0.lock().unwrap().clone();
+    assert_eq!(
+        guardadas.len(),
+        1,
+        "un turno, una decisión registrada (aunque hubiera reintentos)"
+    );
+    let reg = &guardadas[0];
+    assert!(!reg.mensaje.contains(clave), "se coló la clave: {}", reg.mensaje);
+    // `redact::texto` deja el prefijo de la clave y oscurece el valor: así el
+    // dataset sirve para afinar sin entregar la clave.
+    assert!(reg.mensaje.contains("sk-ant-***"), "{}", reg.mensaje);
+    assert_eq!(reg.nivel, format!("{:?}", r.plan.level));
+    assert_eq!(reg.modelo, r.plan.model);
+    assert_eq!(reg.resultado, format!("{:?}", r.output.status));
+    // Y la línea es JSON, que es la forma en que se anexa a un dataset.
+    let linea = reg.to_linea();
+    let j: serde_json::Value = serde_json::from_str(&linea).expect("una línea JSON por turno");
+    assert_eq!(j["nivel"], reg.nivel);
 }

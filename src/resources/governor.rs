@@ -273,6 +273,7 @@ mod tests {
             supports_tools: true,
             supports_thinking: false,
             supports_vision: false,
+            structured_output: false,
             disco_mb: None,
         }
     }

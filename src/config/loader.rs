@@ -3,6 +3,7 @@
 
 use super::schema::ConfigError;
 use crate::decision::rules::Reglas;
+use crate::decision::tuning::Tuning;
 use crate::models::Registry;
 use crate::tools::Herramientas;
 use std::path::{Path, PathBuf};
@@ -39,6 +40,20 @@ impl Cargada {
                 archivo: "brain-rules.json".into(),
                 causa: e.to_string(),
             })?;
+        // §3: los pesos de la decisión ponderada por costo vienen aparte
+        // (`tuning.json`). Sin archivo no hay pesos: `Tuning::neutral()` deja la
+        // elección como estaba, y `c.reglas.tuning.es_neutral()` es lo que el
+        // producto puede decir en la pantalla de «por qué».
+        let pesos = texto(&dir.join("tuning.json"), &mut c)?;
+        let tuning = if pesos.trim().is_empty() {
+            Tuning::neutral()
+        } else {
+            Tuning::desde_json(&pesos).map_err(|causa| ConfigError::Json {
+                archivo: "tuning.json".into(),
+                causa,
+            })?
+        };
+        c.reglas = std::mem::take(&mut c.reglas).con_tuning(tuning);
         c.herramientas = Herramientas::desde_json(&texto(&dir.join("tools.json"), &mut c)?)
             .map_err(|e| ConfigError::Json {
                 archivo: "tools.json".into(),
@@ -133,10 +148,14 @@ mod tests {
         let d = tmpdir("vacio");
         let c = Cargada::leer(Some(&d)).unwrap();
         assert_eq!(c.leidos.len(), 0);
-        // Cuatro, no tres: sin `models.json` se busca también el ejemplo.
-        assert_eq!(c.ausentes.len(), 4, "{:?}", c.ausentes);
+        // Cinco, no tres: sin `models.json` se busca también el ejemplo, y
+        // `tuning.json` es el quinto archivo que se declara ausente en vez de
+        // suponer unos pesos que nadie midió.
+        assert_eq!(c.ausentes.len(), 5, "{:?}", c.ausentes);
         assert!(c.ausentes.iter().any(|a| a.ends_with("models.json")));
         assert!(c.ausentes.iter().any(|a| a.ends_with("models.example.json")));
+        assert!(c.ausentes.iter().any(|a| a.ends_with("tuning.json")));
+        assert!(c.reglas.tuning.es_neutral(), "sin fichero, sin ponderar");
         assert!(c.registry.modelos.is_empty());
         assert!(!c.models_desde_ejemplo);
     }

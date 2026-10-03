@@ -9,6 +9,7 @@ pub mod confidence;
 pub mod engine;
 pub mod fast_path;
 pub mod rules;
+pub mod tuning;
 
 use crate::api::vocab::{
     Confidence, DecisionSource, ExecutionTarget, Intent, Level, ModelTarget, OutputContract,

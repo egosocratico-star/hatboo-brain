@@ -1,0 +1,9 @@
+{
+  "_nota": "Pesos de la decisión ponderada por costo (Plan v1.3 §3 y §15.3): el nivel sale de argmax p(nivel) × peso(nivel, riesgo). ESTOS NÚMEROS TODAVÍA NO ESTÁN MEDIDOS — todos a 1,0 es la forma del fichero sin conducta: el cargador lee `tuning.json` (este ejemplo no se carga nunca) y si no hay fichero, o si todo vale 1,0, decide la puntuación de siempre. §15.3 pide fijar los iniciales en Fase 3, sobre la suite de §9 (precisión, latencia N0/N1, RAM pico, tokens de contexto) y con el ruido medido entre repeticiones. Poner un peso 'a ojo' aquí sería una decisión de producto disfrazada de config.",
+  "pesos": {
+    "N0": { "low": 1.0, "medium": 1.0, "high": 1.0 },
+    "N1": { "low": 1.0, "medium": 1.0, "high": 1.0 },
+    "N2": { "low": 1.0, "medium": 1.0, "high": 1.0 },
+    "N3": { "low": 1.0, "medium": 1.0, "high": 1.0 }
+  }
+}

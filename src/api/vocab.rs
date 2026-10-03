@@ -319,6 +319,10 @@ pub enum FailureClass {
     ModelCapability,
     /// El verificador no pudo correr → `Unverifiable`.
     Verificacion,
+    /// §5.1 del Canon v1.3: el proveedor cortó la salida por el techo de tokens.
+    /// No es `Formato`: el texto no está mal, está **incompleto**, y reintentarlo
+    /// con el mismo techo reproduce el corte.
+    Truncado,
 }
 
 /// Señales medidas **antes** de decidir. El código las calcula; las reglas de

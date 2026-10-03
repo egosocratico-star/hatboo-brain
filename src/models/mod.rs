@@ -45,6 +45,14 @@ pub struct ModelInfo {
     pub supports_thinking: bool,
     #[serde(default)]
     pub supports_vision: bool,
+    /// Si el modelo sostiene una salida **ceñida a un esquema JSON** (§X del
+    /// Canon). Como los otros `supports_*`, vale lo medido: `false` significa
+    /// «no probado o probado y no», nunca «supongo que sí». Ollama no declara
+    /// esta capacidad en local (medido el 03-10: `gemma3:1b` →
+    /// `["completion"]`, `qwen3:1.7b` → `["completion","tools","thinking"]`),
+    /// así que lo que la pone a `true` es la sonda de `--sondear`.
+    #[serde(default)]
+    pub structured_output: bool,
     /// Lo que ocupa **en disco**, para cuando nadie midió la RAM residente. Es una
     /// estimación y se dice como tal: §X del Canon quiere `ram_mb_by_ctx` medido.
     #[serde(default)]
@@ -187,6 +195,7 @@ mod tests {
             supports_tools: tools,
             supports_thinking: false,
             supports_vision: false,
+            structured_output: false,
             disco_mb: None,
         }
     }
