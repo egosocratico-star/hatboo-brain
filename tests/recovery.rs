@@ -445,3 +445,44 @@ fn pedido_json() -> BrainRequest {
         },
     ])
 }
+
+/// La pieza que faltaba para que un producto pueda hacer aprobación interactiva:
+/// el crate deja la llamada pendiente y termina, así que lo que pasó después
+/// (aprobada, ejecutada, qué salió) tiene que volver a entrar en el prompt. Sin
+/// `OpcionesDeCorrida::observaciones` no había por dónde.
+#[tokio::test]
+async fn una_observacion_del_producto_llega_al_prompt() {
+    let mock = Arc::new(MockProvider::nuevo(vec![modelo("nano:0.8b", 1)]).con_nombre("ollama"));
+    mock.responde_texto("entonces el README ya está escrito");
+    let brain = cerebro(mock.clone());
+    let opts = OpcionesDeCorrida::nueva().con_observaciones(vec![
+        "write_file aprobada por el usuario: 12 líneas en README.md".into(),
+    ]);
+    let r = brain
+        .run_with(
+            &BrainRequest::nuevo("hatboo", "work", "escribe un README con el arranque"),
+            opts,
+        )
+        .await;
+    assert!(r.is_ok(), "{r:?}");
+    let peticion = mock.ultima_peticion().expect("el mock recibió una petición");
+    assert!(
+        peticion.prompt.contains("write_file aprobada"),
+        "la observación no llegó al prompt: {:?}",
+        peticion.prompt
+    );
+}
+
+/// Y al revés: si no se pasan observaciones, no se cuela ninguna.
+#[tokio::test]
+async fn sin_observaciones_el_prompt_no_lleva_observaciones() {
+    let mock = Arc::new(MockProvider::nuevo(vec![modelo("nano:0.8b", 1)]).con_nombre("ollama"));
+    mock.responde_texto("va");
+    let brain = cerebro(mock.clone());
+    let r = brain
+        .run(&BrainRequest::nuevo("hatboo", "chat", "qué es un mutex"))
+        .await;
+    assert!(r.is_ok(), "{r:?}");
+    let peticion = mock.ultima_peticion().expect("una petición");
+    assert!(!peticion.prompt.contains("observación"), "{:?}", peticion.prompt);
+}

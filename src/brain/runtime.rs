@@ -111,6 +111,12 @@ impl Montaje {
 pub struct OpcionesDeCorrida {
     pub cancelar: CancelToken,
     pub eventos: Option<Arc<dyn Emitidor>>,
+    /// Lo que el producto ya sabe cuando reanuda: el resultado de una tool que
+    /// dejó pendiente de aprobación. `correr` siembra con esto sus observaciones,
+    /// así que una segunda llamada ve lo que pasó entre las dos en vez de
+    /// reempezar de cero. Sin este campo la aprobación interactiva no tiene por
+    /// dónde volver: el crate deja la llamada pendiente y termina.
+    pub observaciones: Vec<String>,
 }
 
 impl OpcionesDeCorrida {
@@ -120,6 +126,11 @@ impl OpcionesDeCorrida {
 
     pub fn con_eventos(mut self, e: Arc<dyn Emitidor>) -> OpcionesDeCorrida {
         self.eventos = Some(e);
+        self
+    }
+
+    pub fn con_observaciones(mut self, o: Vec<String>) -> OpcionesDeCorrida {
+        self.observaciones = o;
         self
     }
 
@@ -308,7 +319,7 @@ impl Brain {
         // entera (y en CPU el segundo intento repaga el prefill completo).
         let mut escalador = Escalador::nuevo(decision.level.reintentos())
             .con_flags(&self.config.flags);
-        let mut observaciones: Vec<String> = Vec::new();
+        let mut observaciones: Vec<String> = opts.observaciones.clone();
         let mut reintentos: u8 = 0;
         let mut recargas: u32 = 0;
         let mut rondas: u8 = 0;
