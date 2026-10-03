@@ -49,6 +49,14 @@ impl Herramientas {
         serde_json::from_str(texto)
     }
 
+    /// Las tools versionadas con el crate (`config/tools.json`), para un producto
+    /// sin directorio de config. Igual que `Reglas::empotradas`: sin archivo no se
+    /// finge un catálogo vacío, se dice que falló.
+    pub fn empotradas() -> Result<Herramientas, serde_json::Error> {
+        const JSON: &str = include_str!("../../config/tools.json");
+        serde_json::from_str(JSON)
+    }
+
     pub fn disponibles(&self) -> &[DefinicionTool] {
         &self.tools
     }
@@ -69,6 +77,14 @@ impl Herramientas {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn las_tools_embebidas_no_salen_vacias() {
+        let h = Herramientas::empotradas().expect("config/tools.json embebido");
+        assert!(!h.disponibles().is_empty(), "el catálogo embebido no puede no tener tools");
+        assert!(h.escribe("write_file"), "write_file tiene que decir que escribe");
+        assert!(h.find("read_file").is_some());
+    }
 
     #[test]
     fn lee_el_catalogo_y_sabe_cual_escribe() {

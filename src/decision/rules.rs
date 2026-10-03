@@ -206,6 +206,16 @@ impl Reglas {
         Ok(r)
     }
 
+    /// Las reglas versionadas con el crate (`config/brain-rules.json`), para un
+    /// producto que no tiene un directorio de config donde leer: el instalador de
+    /// Hatboo no lleva `brain-rules.json` detrás. `Reglas::default()` está
+    /// **vacío** a propósito, así que un fallo aquí se propaga en vez de sustituir
+    /// unas reglas por ninguna.
+    pub fn empotradas() -> Result<Reglas, ReglaError> {
+        const JSON: &str = include_str!("../../config/brain-rules.json");
+        Self::desde_json(JSON)
+    }
+
     fn eval(senal: &serde_json::Value, op: &Operador, valor: &serde_json::Value) -> bool {
         use serde_json::Value as V;
         let orden = |a: &V, b: &V| -> Option<std::cmp::Ordering> {
@@ -377,6 +387,22 @@ pub fn nivelacion_verificacion(level: Level, contrato: &OutputContract) -> Verif
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn las_reglas_embebidas_candidatean_solo() {
+        let r = Reglas::empotradas().expect("brain-rules.json embebido");
+        assert!(!r.reglas.is_empty(), "sin reglas el Brain no candidatea nada");
+        assert!(!r.verbos_accion.is_empty() && !r.verbos_lectura.is_empty());
+        assert!(!r.saludos.is_empty(), "el Fast Path de saludos se queda vacío");
+        // `desde_json` ya validó señales y operadores; aquí se comprueba que lo
+        // embebido es el mismo catálogo que el archivo, no un muñeco.
+        let archivo = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/config/brain-rules.json"
+        ))
+        .unwrap();
+        assert_eq!(r, Reglas::desde_json(&archivo).unwrap());
+    }
 
     const JS: &str = r#"{
       "version": 1,
