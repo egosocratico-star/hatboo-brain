@@ -49,6 +49,13 @@ pub struct GenerationRequest {
     pub temperature: f32,
     pub seed: u64,
     pub timeout_s: u32,
+    /// El Plan firmó un contrato `Json`. No es un capricho del prompt: en Ollama
+    /// es la diferencia entre que `gemma3:1b` devuelva ```` ```json ```` envuelto
+    /// (medido el 03-10, no parsea como JSON) o devuelva JSON suelto que sí
+    /// parsea. Con `structured_output` del registry a `false` se pide `"json"` a
+    /// secas; el `json_schema` de Ollama contestó **400** en los dos modelos
+    /// locales, así que no se manda nunca desde aquí.
+    pub salida_json: bool,
 }
 
 impl GenerationRequest {
@@ -66,6 +73,7 @@ impl GenerationRequest {
             temperature: 0.0,
             seed: 42,
             timeout_s: 60,
+            salida_json: false,
         }
     }
 
@@ -104,6 +112,14 @@ pub struct GenerationResult {
     /// Fase 0: ~7,3 s en frío, 2,4 s con el caché tibio, 3,7 s si cambia num_ctx.
     #[serde(default)]
     pub carga_ms: Option<u64>,
+    /// El proveedor **cortó la salida por el techo de tokens** (`done_reason:
+    /// "length"` en Ollama, `finish_reason: "length"` en las puertas
+    /// OpenAI-compatibles, `stop_reason: "max_tokens"` en Anthropic). Importa
+    /// porque un JSON cortado no es un problema de formato: reintentarlo con el
+    /// mismo techo reproduce el corte, y eso son dos llamadas al modelo que no
+    /// podían salir bien.
+    #[serde(default)]
+    pub truncado: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -245,12 +261,17 @@ pub(crate) fn json_de_sse(eventos: &[serde_json::Value]) -> serde_json::Value {
         std::collections::BTreeMap::new();
     let mut modelo = String::new();
     let mut uso = serde_json::json!({});
+    let mut fin = String::new();
     for e in eventos {
         if let Some(m) = e.get("model").and_then(|v| v.as_str()) {
             modelo = m.to_string();
         }
         if let Some(u) = e.get("usage") {
             uso = u.clone();
+        }
+        // `finish_reason` viene como hermana del `delta`, en el último chunk.
+        if let Some(f) = e.pointer("/choices/0/finish_reason").and_then(|v| v.as_str()) {
+            fin = f.to_string();
         }
         let Some(delta) = e.pointer("/choices/0/delta") else {
             continue;
@@ -304,6 +325,11 @@ pub(crate) fn json_de_sse(eventos: &[serde_json::Value]) -> serde_json::Value {
         mensaje["tool_calls"] = serde_json::Value::Array(llamadas);
     }
     let mut v = serde_json::json!({"choices":[{"message":mensaje}]});
+    if !fin.is_empty() {
+        // Sin esta línea el stream perdía el aviso: `interpretar` mira
+        // `finish_reason` para saber si la salida la cortó el techo.
+        v["choices"][0]["finish_reason"] = serde_json::Value::String(fin);
+    }
     if !uso.is_null() {
         v["usage"] = uso;
     }

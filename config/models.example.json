@@ -16,6 +16,12 @@
     "pase `brain-bench --sondear`, que intenta una tool call real y un think real,",
     "estos tres campos no son evidencia.",
     "",
+    "structured_output va abajo en false para todos los locales y no es olvido:",
+    "Ollama no lo declara en `capabilities` (medido 03-10 en este equipo —",
+    "gemma3:1b dice solo completion, qwen3:1.7b completion/tools/thinking) y al",
+    "mandarle un format json_schema contestó HTTP 400 en los dos. Lo que lo pone",
+    "a true es la sonda de --sondear, que pide el esquema y comprueba el resultado.",
+    "",
     "carga_fria_ms / carga_tibia_ms: 5,9-7,3 s en frío y 2,4 s recargando el mismo",
     "ctx (medido, fase0.md §3). Cambiar num_ctx cuesta ~3,7 s: el Plan intenta no",
     "cambiarlo entre turnos de la misma sesión."
@@ -35,6 +41,7 @@
       "supports_tools": true,
       "supports_thinking": true,
       "supports_vision": true,
+      "structured_output": false,
       "disco_mb": 1036
     },
     {
@@ -50,6 +57,7 @@
       "supports_tools": false,
       "supports_thinking": false,
       "supports_vision": false,
+      "structured_output": false,
       "disco_mb": 815
     },
     {
@@ -65,6 +73,7 @@
       "supports_tools": true,
       "supports_thinking": false,
       "supports_vision": false,
+      "structured_output": false,
       "disco_mb": 986
     },
     {
@@ -80,6 +89,7 @@
       "supports_tools": true,
       "supports_thinking": false,
       "supports_vision": false,
+      "structured_output": false,
       "disco_mb": 1321
     },
     {
@@ -95,6 +105,7 @@
       "supports_tools": true,
       "supports_thinking": true,
       "supports_vision": false,
+      "structured_output": false,
       "disco_mb": 1117
     },
     {
@@ -110,6 +121,7 @@
       "supports_tools": true,
       "supports_thinking": true,
       "supports_vision": false,
+      "structured_output": false,
       "disco_mb": 1359
     },
     {
@@ -125,6 +137,7 @@
       "supports_tools": true,
       "supports_thinking": false,
       "supports_vision": false,
+      "structured_output": false,
       "disco_mb": 986
     }
   ]

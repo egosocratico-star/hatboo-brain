@@ -138,6 +138,8 @@ impl AnthropicProvider {
             ttft_ms: None,
             tok_s: None,
             carga_ms: Some(0),
+            // Anthropic avisa con `stop_reason`, no con un error.
+            truncado: j.get("stop_reason").and_then(|v| v.as_str()) == Some("max_tokens"),
         }
     }
 
@@ -241,6 +243,14 @@ impl AnthropicProvider {
             })
             .collect();
         let mut v = serde_json::json!({"content":content,"usage":uso});
+        if let Some(f) = eventos
+            .iter()
+            .find_map(|e| e.pointer("/delta/stop_reason").and_then(|x| x.as_str()))
+        {
+            // `stop_reason` llega en el evento `message_delta`; sin recogerlo aquí,
+            // una salida cortada por `max_tokens` pasaraba como texto completo.
+            v["stop_reason"] = serde_json::Value::String(f.to_string());
+        }
         if !modelo.is_empty() {
             v["model"] = serde_json::Value::String(modelo);
         }
@@ -384,6 +394,7 @@ mod tests {
             temperature: 0.0,
             seed: 42,
             timeout_s: 30,
+            salida_json: false,
         }
     }
 

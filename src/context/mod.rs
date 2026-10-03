@@ -1,6 +1,7 @@
 //! El contexto es un recurso (§III.5). Aquí se ordena, se presupuesta y se deja
 //! constancia de lo que se tuvo que fuera.
 
+pub mod bm25;
 pub mod sources;
 
 use crate::prompt::ContadorTokens;
@@ -32,6 +33,11 @@ pub struct Pieza {
     /// `dropped_context` y en el inspector.
     pub origen: String,
     pub texto: String,
+    /// §XII del Canon v1.3: sensibilidad **por ítem**. `true` = esto no sale del
+    /// equipo: si el Plan acaba yendo a una API, la pieza se queda fuera y se
+    /// registra, con su presupuesto entero libre o sin él.
+    #[serde(default)]
+    pub sensible: bool,
 }
 
 impl Pieza {
@@ -40,8 +46,25 @@ impl Pieza {
             prioridad,
             origen: origen.into(),
             texto: texto.into(),
+            sensible: false,
         }
     }
+
+    /// Marca la pieza como no saliente. Se encadena: `Pieza::nueva(..).sensible()`.
+    pub fn sensible(mut self) -> Pieza {
+        self.sensible = true;
+        self
+    }
+}
+
+/// Las piezas que no pueden salir del equipo, separadas de las que sí. Devuelve
+/// también los orígenes descartados, con el prefijo `sensibilidad:` para que el
+/// `reason` y el inspector digan **por qué** faltaba ese trozo y no «no cabía».
+pub fn fuera_del_equipo(piezas: Vec<Pieza>) -> (Vec<Pieza>, Vec<String>) {
+    let (dentro, fuera): (Vec<Pieza>, Vec<Pieza>) =
+        piezas.into_iter().partition(|p| !p.sensible);
+    let nombres = fuera.iter().map(|p| format!("sensibilidad:{}", p.origen)).collect();
+    (dentro, nombres)
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -79,6 +102,12 @@ impl Armado {
 /// registra como rechazada, porque a medias no se puede leer un archivo.
 pub fn armar(mut piezas: Vec<Pieza>, presupuesto: u32, contador: &dyn ContadorTokens) -> Armado {
     piezas.sort_by_key(|p| p.prioridad);
+    llenar(piezas, presupuesto, contador)
+}
+
+/// El llenado, separado del orden: `armar` ordena por prioridad y
+/// `armar_por_relevancia` trae el orden puesto. El corte es el mismo en los dos.
+fn llenar(piezas: Vec<Pieza>, presupuesto: u32, contador: &dyn ContadorTokens) -> Armado {
     let mut armado = Armado {
         presupuesto,
         ..Default::default()
@@ -101,6 +130,23 @@ pub fn armar(mut piezas: Vec<Pieza>, presupuesto: u32, contador: &dyn ContadorTo
     armado
 }
 
+/// §5.1: el mismo presupuesto y el mismo corte, pero decide la **relevancia del
+/// pedido** qué pieza se queda fuera. Está detrás de `Flags.bm25_contexto`
+/// (apagado) por un motivo concreto: `k1 = 1,2` y `b = 0,75` son los de la
+/// receta, no números medidos en esta máquina, y encenderlo sin medir cambiaría
+/// el resultado sin poder decir que mejora algo. Las piezas de seguridad van
+/// siempre delante.
+pub fn armar_por_relevancia(
+    piezas: Vec<Pieza>,
+    presupuesto: u32,
+    consulta: &str,
+    contador: &dyn ContadorTokens,
+) -> Armado {
+    let orden = bm25::para_armar(&piezas, consulta, bm25::Params::default());
+    let reordenadas: Vec<Pieza> = orden.into_iter().map(|i| piezas[i].clone()).collect();
+    llenar(reordenadas, presupuesto, contador)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +154,22 @@ mod tests {
 
     fn pieza(p: Prioridad, origen: &str, n: usize) -> Pieza {
         Pieza::nueva(p, origen, "x".repeat(n))
+    }
+
+    #[test]
+    fn lo_sensible_se_separa_y_dice_quien_es() {
+        let mut secreta = pieza(Prioridad::ArchivoNombrado, "archivo:.env", 40);
+        secreta.sensible = true;
+        let (dentro, fuera) = fuera_del_equipo(vec![
+            pieza(Prioridad::Objetivo, "objetivo", 20),
+            secreta,
+        ]);
+        assert_eq!(dentro.len(), 1, "solo la no sensible puede salir del equipo");
+        assert_eq!(fuera, vec!["sensibilidad:archivo:.env".to_string()]);
+        // Y sin nada sensible no inventa descartes.
+        let (d2, f2) = fuera_del_equipo(vec![pieza(Prioridad::Objetivo, "objetivo", 20)]);
+        assert_eq!(d2.len(), 1);
+        assert!(f2.is_empty(), "{f2:?}");
     }
 
     #[test]
@@ -170,5 +232,36 @@ mod tests {
         let a = armar(vec![pieza(Prioridad::Objetivo, "o", 4)], 0, &Estimador);
         assert!(a.vacio());
         assert_eq!(a.rechazadas, vec!["o".to_string()]);
+    }
+
+    /// §5.1 con el flag: el hueco que deja el presupuesto la prioridad lo reparte
+    /// de una manera y la relevancia del pedido, de otra. Aquí las dos piezas son
+    /// del mismo escalón de prioridad, así que lo único que puede cambiar el
+    /// resultado es el BM25 — y si no lo cambiara, la pieza sería un adorno.
+    #[test]
+    fn armar_por_relevancia_deja_fuera_la_que_no_va_con_el_pedido() {
+        let pedendo = Pieza::nueva(
+            Prioridad::Resto,
+            "archivo:pedendo.rs",
+            "fn pedendo () { mutex lock }",
+        );
+        let otra = Pieza::nueva(Prioridad::Resto, "archivo:otra.rs", "fn otra () { contador suma }");
+        // Mismo escalón de prioridad y la irrelevante **delante** en la lista: así
+        // se ve la diferencia. Por prioridad entra la primera que cabe; por
+        // relevancia, la que habla del `mutex`.
+        let piezas = vec![otra.clone(), pedendo.clone()];
+        // 9 tokens: cada pieza son ~7 con el estimador, así que entra una y las
+        // dos juntas no.
+        let por_prioridad = armar(piezas.clone(), 9, &Estimador);
+        let por_relevancia = armar_por_relevancia(piezas, 9, "¿qué hace el mutex?", &Estimador);
+        assert_eq!(por_prioridad.incluidas.len(), 1, "{:?}", por_prioridad.rechazadas);
+        assert_eq!(por_relevancia.incluidas.len(), 1, "{:?}", por_relevancia.rechazadas);
+        assert_eq!(por_prioridad.incluidas[0].origen, "archivo:otra.rs");
+        assert_eq!(
+            por_relevancia.incluidas[0].origen, "archivo:pedendo.rs",
+            "la del mutex tiene que quedar dentro: {:?}",
+            por_relevancia.rechazadas
+        );
+        assert_eq!(por_relevancia.rechazadas, vec!["archivo:otra.rs".to_string()]);
     }
 }

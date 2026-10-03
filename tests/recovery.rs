@@ -34,6 +34,7 @@ fn modelo(id: &str, tier: u8) -> ModelInfo {
         supports_tools: true,
         supports_thinking: false,
         supports_vision: false,
+        structured_output: false,
         disco_mb: Some(815),
     }
 }
@@ -359,6 +360,68 @@ async fn escalar_emite_el_evento_deja_el_linaje_y_no_regala_tools() {
         r.plan.tools.is_empty(),
         "subir de tier no da permisos: {:?}",
         r.plan.tools
+    );
+}
+
+/// §5.1 del Canon: la subclase `truncated`. Un JSON cortado por el techo **no**
+/// es un fallo de formato: reintentar con el mismo Plan reproduce el corte, y eso
+/// son dos llamadas al modelo que no podían salir bien. Aquí se cobra la primera
+/// y se para, diciendo por qué.
+#[tokio::test]
+async fn una_salida_cortada_por_el_techo_no_se_reintenta_igual() {
+    let cfg = hatboo_brain::config::loader::Cargada::leer(Some(&std::path::Path::new(
+        env!("CARGO_MANIFEST_DIR"),
+    )
+    .join("config")))
+    .unwrap();
+    let mock = Arc::new(MockProvider::nuevo(vec![modelo("nano:0.8b", 1)]).con_nombre("ollama"));
+    // Cuatro salidas encoladas a propósito: si el Brain reintentara, se vería en
+    // `n_peticiones`.
+    for _ in 0..4 {
+        mock.responde(hatboo_brain::providers::GenerationResult {
+            texto: r#"{"resumen":"un mutex"#.into(),
+            modelo: "nano:0.8b".into(),
+            truncado: true,
+            ..Default::default()
+        });
+    }
+    let reglas = hatboo_brain::decision::rules::Reglas::desde_json(
+        r#"{"version":1,"reglas":[{"id":"json-a-n2",
+             "cuando":[{"senal":"message_length","op":">","valor":10}],
+             "entonces":{"intent":"ask","level":"N2","contrato":"json"}}]}"#,
+    )
+    .unwrap();
+    let brain = Brain::nuevo(Montaje {
+        proveedores: vec![mock.clone()],
+        registry: Registry::nuevo(vec![modelo("nano:0.8b", 1)]),
+        reglas,
+        herramientas: cfg.herramientas.clone(),
+        sonda: Arc::new(hatboo_brain::resources::SondaFija {
+            libre: Some(8000),
+            ..Default::default()
+        }),
+        ..Montaje::de_proveedor(mock.clone())
+    })
+    .unwrap();
+    let r = brain
+        .run_with(&pedido_json(), OpcionesDeCorrida::nueva())
+        .await
+        .expect("hay salida que entregar, aunque esté cortada");
+    assert_eq!(
+        mock.n_peticiones(),
+        1,
+        "el techo cortó la salida y aun así se volvió al modelo"
+    );
+    assert_eq!(r.metrics.clase_fallo, Some(FailureClass::Truncado));
+    assert!(!r.es_exito(), "una salida cortada no es un éxito");
+    // `Rechazado`, no `SinVerificar`: el contrato `json` se verificó y **falló**
+    // porque el texto está cortado. `SinVerificar` es para cuando no había con
+    // qué comprobar.
+    assert_eq!(
+        r.output.status,
+        hatboo_brain::api::response::OutputStatus::Rechazado,
+        "{:?}",
+        r.output.status
     );
 }
 

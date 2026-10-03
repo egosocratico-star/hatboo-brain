@@ -46,6 +46,16 @@ pub struct Flags {
     pub logprobs: bool,
     /// Backend de decisión tipo Laya (Fase 7). Igual que el anterior: sin pieza.
     pub backend_decision: bool,
+    /// §15.9: guardar el texto del usuario (redactado) como dataset de
+    /// decisiones. **Apagado por defecto** y sigue estándolo aunque exista la
+    /// pieza: es el único camino a Fase 7, pero son datos de usuario.
+    #[serde(alias = "record_decisions")]
+    pub record_decisiones: bool,
+    /// §5.1: elegir qué pieza de contexto se queda fuera por BM25 del pedido en
+    /// vez de por `Prioridad`. Apagado: los parámetros de la receta no están
+    /// medidos en esta máquina y mover el corte sin medir es cambiar conducta.
+    #[serde(alias = "bm25_contexto")]
+    pub bm25_contexto: bool,
 }
 
 impl Default for Flags {
@@ -58,6 +68,8 @@ impl Default for Flags {
             verificacion_ejecucion: true,
             logprobs: false,
             backend_decision: false,
+            record_decisiones: false,
+            bm25_contexto: false,
         }
     }
 }

@@ -99,6 +99,12 @@ impl OpenAiProvider {
         // `seed` lo admiten OpenAI y la mayoría de puertas compatibles; si una no
         // lo conoce, el error viene en el status y se reporta.
         cuerpo["seed"] = serde_json::json!(req.seed);
+        // Contrato `Json` del Plan. OpenAI y las puertas compatibles piden el
+        // objeto con `response_format`; el `json_schema` ceñido no se manda: no
+        // hay ningún esquema en el Plan que lo alimente todavía.
+        if req.salida_json {
+            cuerpo["response_format"] = serde_json::json!({ "type": "json_object" });
+        }
         // `num_ctx` es de Ollama: aquí se traduce a la ventana que el proveedor
         // acepte, que es `max_tokens` para la salida y nada para la entrada.
         if let Some(t) = nivel_a_thinking(&req.thinking, nombre_proveedor) {
@@ -173,6 +179,9 @@ impl OpenAiProvider {
             ttft_ms: None,
             tok_s: None,
             carga_ms: Some(0),
+            // `"length"` = lo paró el techo; `"stop"` = terminó el modelo.
+            truncado: j.pointer("/choices/0/finish_reason").and_then(|v| v.as_str())
+                == Some("length"),
         }
     }
 }
@@ -265,6 +274,9 @@ impl ModelProvider for OpenAiProvider {
                 supports_tools: true,
                 supports_thinking: id.starts_with("o") || id.contains("think"),
                 supports_vision: true,
+                // Declarado por el proveedor, igual que el `supports_vision` de
+                // arriba: ninguna de las dos la ha medido este crate.
+                structured_output: true,
                 disco_mb: None,
             });
         }
@@ -378,7 +390,20 @@ mod tests {
             temperature: 0.0,
             seed: 42,
             timeout_s: 60,
+            salida_json: false,
         }
+    }
+
+    /// Igual que en Ollama pero con la clave que habla OpenAI: `response_format`.
+    /// El `json_schema` ceñido no se manda porque ningún Plan lleva esquema.
+    #[test]
+    fn un_contrato_json_pide_response_format() {
+        let mut r = req();
+        r.salida_json = true;
+        assert_eq!(OpenAiProvider::cuerpo_de(&r, "openai")["response_format"]["type"], "json_object");
+        assert!(OpenAiProvider::cuerpo_de(&req(), "openai")
+            .get("response_format")
+            .is_none());
     }
 
     #[test]
@@ -414,6 +439,27 @@ mod tests {
             "con razonamiento no se mandan los dos topes: {c}"
         );
         assert_eq!(nivel_a_thinking(&r.thinking, "anthropic"), None);
+    }
+
+    #[test]
+    fn un_finish_reason_length_avisa_de_que_corto_el_techo() {
+        let j = serde_json::json!({"choices":[{"message":{"content":"{\"a\":"},"finish_reason":"length"}]});
+        assert!(OpenAiProvider::interpretar(&j, "gpt-4o-mini").truncado);
+        let ok = serde_json::json!({"choices":[{"message":{"content":"hola"},"finish_reason":"stop"}]});
+        assert!(!OpenAiProvider::interpretar(&ok, "gpt-4o-mini").truncado);
+    }
+
+    #[test]
+    fn el_stream_no_pierde_el_finish_reason() {
+        // `interpretar` lee el techo de `/choices/0/finish_reason`; si el arreglo
+        // del stream no lo copia, un corte pasaría por problema de formato.
+        let chunks = vec![
+            serde_json::json!({"choices":[{"delta":{"content":"{\"a\":"}}]}),
+            serde_json::json!({"choices":[{"delta":{},"finish_reason":"length"}]}),
+        ];
+        let completo = crate::providers::json_de_sse(&chunks);
+        assert_eq!(completo["choices"][0]["finish_reason"], "length");
+        assert!(OpenAiProvider::interpretar(&completo, "gpt-4o-mini").truncado);
     }
 
     #[test]

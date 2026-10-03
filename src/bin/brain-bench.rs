@@ -140,7 +140,8 @@ brain-bench — arnés de medición del Brain (§9)
   --margen N          MB libres que exige el Governor (su valor por defecto son
                       1500, que en un portátil de 8 GB no deja cargar nada)
   --salida RUTA       volcar los datos crudos en JSON
-  --sondear           medir RAM por ctx y probar tools/thinking; escribe models.sondeado.json
+  --sondear           medir RAM por ctx y probar tools, thinking y salida
+                      estructurada; escribe models.sondeado.json
   --decisiones        solo el Engine sobre la suite: precisión de nivel, riesgo,
                       contrato, tools y presupuesto firmado. Sin modelo, sin RAM.
 ";
@@ -1097,6 +1098,7 @@ async fn llama_directo(
         temperature: 0.0,
         seed: 42,
         timeout_s: 300,
+        salida_json: false,
     };
     ollama.generate(g).await.map_err(|err| format!("proveedor: {err}"))
 }
@@ -1446,6 +1448,27 @@ async fn sondeo(ollama: &Arc<OllamaProvider>, registry: &Registry) {
         let (piensa, por_que) = prueba_pensamiento(ollama, &info.id).await;
         info.supports_thinking = piensa;
         println!("  thinking: {piensa} · {por_que}");
+        // §X quiere `structured_output` en el registry, y la ficha de Ollama no
+        // lo declara (medido: `capabilities` solo dice completion/tools/thinking).
+        // Lo único que lo sabe es un pedido con esquema ceñido y si volvió JSON.
+        let esquema = serde_json::json!({
+            "type": "object",
+            "properties": { "respuesta": { "type": "string" } },
+            "required": ["respuesta"],
+            "additionalProperties": false
+        });
+        let (estructurada, por_que) = match ollama.prueba_esquema(&info.id, &esquema).await {
+            Ok(texto) => match serde_json::from_str::<serde_json::Value>(&texto) {
+                Ok(j) => match hatboo_brain::verification::json::mini_schema(&j, &esquema) {
+                    Ok(()) => (true, format!("cumplió el esquema: {}", texto.chars().take(60).collect::<String>())),
+                    Err(camino) => (false, format!("JSON válido pero fuera del esquema en {camino}")),
+                },
+                Err(_) => (false, format!("no devolvió JSON: {}", texto.chars().take(60).collect::<String>())),
+            },
+            Err(e) => (false, e),
+        };
+        info.structured_output = estructurada;
+        println!("  salida estructurada: {estructurada} · {por_que}");
         let _ = ollama.expulsar(&info.id).await;
         salida.push(info);
     }
@@ -1482,6 +1505,7 @@ async fn carga_y_medir(
         temperature: 0.0,
         seed: 42,
         timeout_s: 300,
+        salida_json: false,
     };
     let inicio = Instant::now();
     ollama.generate(g).await.map_err(|e| e.to_string())?;
@@ -1518,6 +1542,7 @@ async fn prueba_tool(ollama: &Arc<OllamaProvider>, id: &str) -> (bool, String) {
         temperature: 0.0,
         seed: 42,
         timeout_s: 300,
+        salida_json: false,
     };
     match ollama.generate(g).await {
         Ok(r) if !r.tool_calls.is_empty() => (true, format!("llamó «{}»", r.tool_calls[0].tool)),
@@ -1540,6 +1565,7 @@ async fn prueba_pensamiento(ollama: &Arc<OllamaProvider>, id: &str) -> (bool, St
         temperature: 0.0,
         seed: 42,
         timeout_s: 300,
+        salida_json: false,
     };
     match ollama.generate(g).await {
         Ok(r) => {

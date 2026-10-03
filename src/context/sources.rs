@@ -25,11 +25,13 @@ pub fn piezas_del_pedido(
         .map(|s| s.to_string())
         .or_else(|| crate::decision::fast_path::parece_ruta(&req.message));
     if let Some(r) = mencionada {
-        v.push(Pieza::nueva(
+        let mut pieza = Pieza::nueva(
             Prioridad::ArchivoNombrado,
             format!("mencionado:{r}"),
             format!("El pedido menciona «{r}»."),
-        ));
+        );
+        pieza.sensible = parece_secreto(&r);
+        v.push(pieza);
     }
 
     if let Some(p) = &req.project {
@@ -91,6 +93,26 @@ fn si_no(b: bool) -> &'static str {
     }
 }
 
+/// §XII del Canon v1.3: sensibilidad **por ítem de contexto**, resuelta por nombre
+/// de archivo. A propósito corta —`config.toml` no es un secreto y `.env.local`
+/// sí— porque marcarlo todo equivale a no marcar nada. Lo marcado aquí no sale
+/// del equipo: si el Plan acaba en una API se descarta y se registra con
+/// `sensibilidad:` delante (ver `context::fuera_del_equipo`).
+fn parece_secreto(ruta: &str) -> bool {
+    let nombre = ruta
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(ruta)
+        .to_ascii_lowercase();
+    nombre == ".env"
+        || nombre.starts_with(".env.")
+        || nombre.ends_with(".pem")
+        || nombre.ends_with(".key")
+        || nombre.starts_with("id_rsa")
+        || nombre.contains("credentials")
+        || nombre.contains("secrets")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +156,26 @@ mod tests {
         let s = piezas_de_seguridad(&req, "preguntar siempre");
         assert!(s.iter().all(|p| p.prioridad == Prioridad::Seguridad));
         assert!(s.iter().any(|p| p.origen == "local_only"));
+    }
+
+    #[test]
+    fn un_archivo_de_claves_se_marca_como_no_saliente() {
+        let req = BrainRequest::nuevo("hatboo", Mode::CHAT, "mira y dime qué falta");
+        let p = piezas_del_pedido(&req, None, Some(".env.local"));
+        let marcada = p
+            .iter()
+            .find(|x| x.origen.contains(".env.local"))
+            .expect("la pieza del archivo mencionado");
+        assert!(marcada.sensible, "un `.env.local` no se manda a una API");
+
+        // Y una fuente normal no se marca: si todo fuese sensible, la regla no
+        // filtraría nada.
+        let p2 = piezas_del_pedido(&req, None, Some("src/main.rs"));
+        assert!(
+            p2.iter().all(|x| !x.sensible),
+            "{:?}",
+            p2.iter().map(|x| &x.origen).collect::<Vec<_>>()
+        );
     }
 
     #[test]

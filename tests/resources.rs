@@ -32,6 +32,7 @@ fn modelo(id: &str, tier: u8, ram: u64, local: bool, tools: bool) -> ModelInfo {
         supports_tools: tools,
         supports_thinking: false,
         supports_vision: false,
+        structured_output: false,
         disco_mb: Some(ram),
     }
 }

@@ -131,6 +131,17 @@ impl Escalador {
                 // parar. §XIV: Unverifiable no es éxito.
                 porque: "no había cómo verificar; se reporta como no verificable".into(),
             },
+            FailureClass::Truncado => {
+                // El techo vive en el Plan firmado, y un Plan no se parchea a
+                // mitad de corrida (§VIII): reintentar igual reproduce el corte.
+                // Parar y decir qué hay que cambiar cuesta menos que quemar otras
+                // dos llamadas al modelo en lo mismo.
+                Accion::Abortar {
+                    porque: "la salida la cortó el techo del Plan: hace falta un Plan \
+                             con más salida o menos contexto, no otro intento igual"
+                        .into(),
+                }
+            }
             c @ (FailureClass::Formato | FailureClass::Tool | FailureClass::Contexto) => {
                 if agotado {
                     return Accion::Abortar {
@@ -280,6 +291,16 @@ mod tests {
             e.decidir(F::Entorno),
             Accion::NuevoPlan { subir_tier: false, .. }
         ));
+    }
+
+    #[test]
+    fn el_techo_cortado_no_quema_un_intento() {
+        let mut e = Escalador::nuevo(3);
+        match e.decidir(F::Truncado) {
+            Accion::Abortar { porque } => assert!(porque.contains("techo"), "{porque}"),
+            otra => panic!("con el techo hay que parar, no reintentar igual: {otra:?}"),
+        }
+        assert_eq!(e.usados(), 0, "abortar por truncado no gasta reintentos");
     }
 
     #[test]

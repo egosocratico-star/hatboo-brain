@@ -32,6 +32,7 @@ fn modelos() -> Vec<ModelInfo> {
             supports_tools: false,
             supports_thinking: false,
             supports_vision: false,
+            structured_output: false,
             disco_mb: Some(815),
         },
         ModelInfo {
@@ -47,6 +48,7 @@ fn modelos() -> Vec<ModelInfo> {
             supports_tools: true,
             supports_thinking: false,
             supports_vision: false,
+            structured_output: false,
             disco_mb: Some(3000),
         },
     ]
@@ -292,4 +294,29 @@ fn encender_una_fase_que_no_esta_construida_no_arranca_en_silencio() {
         assert!(s.contains(fase), "el error tiene que decir de qué fase es: {s}");
         assert!(s.contains("no está construida"), "{s}");
     }
+}
+
+/// §1 del Plan: una decisión cerrada solo se mueve con una entrada nueva en
+/// `docs/decision-log.md`. Esta prueba es lo que hace que esa regla sea de
+/// verdad: si alguien sube el `SCHEMA_VERSION` del Plan sin escribir la
+/// entrada, o escribe una entrada con otro número, esto se rompe.
+#[test]
+fn el_registro_de_decisiones_dice_el_schema_que_tiene_el_codigo() {
+    let ruta = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/decision-log.md");
+    let log = std::fs::read_to_string(ruta).expect("el registro viaja en el repo");
+    let ultimo = log
+        .lines()
+        .filter(|l| l.starts_with('|'))
+        .filter_map(|l| {
+            let i = l.find("schema ")? + "schema ".len();
+            l[i..].chars().next()?.to_digit(10)
+        })
+        .next_back()
+        .expect("ninguna entrada del registro habla del schema del Plan");
+    assert_eq!(
+        ultimo,
+        hatboo_brain::planner::plan::SCHEMA_VERSION,
+        "el código está en schema {} y el registro dice otra cosa",
+        hatboo_brain::planner::plan::SCHEMA_VERSION
+    );
 }

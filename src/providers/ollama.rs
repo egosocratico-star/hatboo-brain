@@ -93,6 +93,15 @@ impl OllamaProvider {
             cuerpo["think"] = serde_json::json!(true);
         }
 
+        // El contrato `Json` se le dice al servidor, no se le pide al prompt.
+        // Medido el 03-10: sin esta línea `gemma3:1b` contestaba ```json …```
+        // envuelto (que no parsea); con `"json"` contesta JSON suelto. Con
+        // `json_schema` la respuesta fue HTTP 400 en los dos modelos locales, así
+        // que el esquema ceñido no se manda nunca por aquí.
+        if req.salida_json {
+            cuerpo["format"] = serde_json::json!("json");
+        }
+
         if !req.tools.is_empty() {
             cuerpo["tools"] = serde_json::json!(
                 req.tools
@@ -168,6 +177,7 @@ impl OllamaProvider {
         let mut salida = None;
         let mut carga = None;
         let mut decode = None;
+        let mut truncado = false;
         for l in lineas {
             if let Some(m) = l.get("model").and_then(|v| v.as_str()) {
                 modelo = m.to_string();
@@ -207,6 +217,9 @@ impl OllamaProvider {
                 salida = s;
                 carga = c;
                 decode = d;
+                // `done_reason` distingue al modelo que terminó del techo que lo
+                // paró. Sin esta línea los dos casos se parecían un `Formato`.
+                truncado = l.get("done_reason").and_then(|v| v.as_str()) == Some("length");
             }
         }
         let tok_s = match (salida, decode) {
@@ -227,6 +240,7 @@ impl OllamaProvider {
             ttft_ms: None,
             tok_s,
             carga_ms: carga,
+            truncado,
         }
     }
 }
@@ -329,6 +343,11 @@ impl ModelProvider for OllamaProvider {
                 supports_tools: capacidades.iter().any(|c| c == "tools"),
                 supports_thinking: capacidades.iter().any(|c| c == "thinking"),
                 supports_vision: capacidades.iter().any(|c| c == "vision"),
+                // Ni una versión local de Ollama lo declara (medido el 03-10); si
+                // alguien lo pone a `true` tiene que ser la sonda, no la ficha.
+                structured_output: capacidades
+                    .iter()
+                    .any(|c| c == "structured_output" || c == "structured_outputs"),
                 disco_mb,
             });
             let _ = modelfile;
@@ -442,6 +461,52 @@ impl ModelProvider for OllamaProvider {
 impl OllamaProvider {
     /// Ficha del modelo: capacidades, contexto máximo declarado. Lo que Ollama ya
     /// sabe decir sin cargar nada.
+    /// Sonda de §X: ¿obedece este modelo un `format: json_schema`? Sale por HTTP
+    /// directo y no por `generate` porque el camino normal **nunca** pide un
+    /// esquema; lo que se quiere medir es justamente si el servidor lo acepta.
+    /// Medido el 03-10 en este equipo: `gemma3:1b` y `qwen3:1.7b` contestaron
+    /// HTTP 400, así que `structured_output` sigue siendo `false` hasta que una
+    /// sonda diga lo contrario.
+    pub async fn prueba_esquema(
+        &self,
+        modelo: &str,
+        esquema: &serde_json::Value,
+    ) -> Result<String, String> {
+        let cuerpo = serde_json::json!({
+            "model": modelo,
+            "stream": false,
+            "format": { "type": "json_schema", "schema": esquema },
+            "options": { "temperature": 0.0, "seed": 42, "num_ctx": 2048, "num_predict": 96 },
+            "messages": [{
+                "role": "user",
+                "content": "Responde solo con un JSON que cumpla el esquema."
+            }],
+        });
+        let resp = self
+            .http
+            .post(self.url("/api/chat"))
+            .json(&cuerpo)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| format!("el pedido de sonda no salió: {e}"))?;
+        let estado = resp.status();
+        let val: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("la respuesta no es JSON (HTTP {estado}): {e}"))?;
+        if !estado.is_success() {
+            let motivo = val.get("error").and_then(|v| v.as_str()).unwrap_or("sin motivo");
+            return Err(format!("HTTP {estado}: {motivo}"));
+        }
+        Ok(val
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string())
+    }
+
     async fn ficha(&self, nombre: &str) -> (Vec<String>, Option<u32>, Option<String>) {
         let cuerpo = serde_json::json!({"model": nombre});
         let Ok(resp) = self
@@ -555,7 +620,24 @@ mod tests {
             temperature: 0.0,
             seed: 42,
             timeout_s: 60,
+            salida_json: false,
         }
+    }
+
+    /// El contrato `Json` se le pide al servidor, no se le ruega en el prompt.
+    /// Medido el 03-10 con `gemma3:1b`: sin `format` contestaba con un bloque
+    /// ```` ```json ```` que no parsea; con `"json"` contesta JSON suelto. Y con
+    /// `json_schema` la contestación fue HTTP 400, así que por aquí no se manda.
+    #[test]
+    fn un_contrato_json_le_pide_el_formato_al_servidor() {
+        let mut r = req();
+        r.salida_json = true;
+        assert_eq!(OllamaProvider::cuerpo_de(&r)["format"], "json");
+        // Fuera del contrato JSON no se manda: cambiar el formato cambia la salida.
+        assert!(
+            OllamaProvider::cuerpo_de(&req()).get("format").is_none(),
+            "sin contrato JSON el cuerpo no debe tocar el formato"
+        );
     }
 
     #[test]
@@ -631,6 +713,20 @@ mod tests {
         let linea: serde_json::Value = serde_json::from_str(crudo).unwrap();
         let r = OllamaProvider::juntar(&[linea]);
         assert_eq!(r.tool_calls[0].args["cmd"], "ls");
+    }
+
+    #[test]
+    fn el_techo_de_salida_se_avisa_como_truncado() {
+        let cortada = serde_json::json!({"model":"g","done":true,"done_reason":"length","message":{"content":"{\"a\":"}});
+        assert!(
+            OllamaProvider::juntar(&[cortada]).truncado,
+            "un `done_reason: length` es el techo, no el modelo"
+        );
+        let completo = serde_json::json!({"model":"g","done":true,"done_reason":"stop","message":{"content":"hola"}});
+        assert!(!OllamaProvider::juntar(&[completo]).truncado);
+        // Sin `done_reason` (versiones que no lo mandan) no se inventa nada.
+        let sin = serde_json::json!({"model":"g","done":true,"message":{"content":"hola"}});
+        assert!(!OllamaProvider::juntar(&[sin]).truncado);
     }
 
     #[test]

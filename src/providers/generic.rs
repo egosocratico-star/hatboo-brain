@@ -133,6 +133,7 @@ mod tests {
             temperature: 0.0,
             seed: 42,
             timeout_s: 30,
+            salida_json: false,
         }
     }
 

@@ -16,6 +16,7 @@ use crate::decision::engine::Motor;
 use crate::decision::rules::Reglas;
 use crate::decision::DecisionResult;
 use crate::models::{selector, Registry};
+use crate::observability::decisiones::{RegistroDecision, SinkDecisiones};
 use crate::observability::events::{BrainEvent, CancelToken, Emitidor, VerificacionEvent};
 use crate::observability::logger::{Bitacora, Registro};
 use crate::observability::metrics::Referencia;
@@ -75,6 +76,10 @@ pub struct Montaje {
     pub ejecutor_tools: Option<Arc<dyn EjecutarTool>>,
     pub ejecutor_comandos: Option<Arc<dyn crate::verification::execution::Ejecutor>>,
     pub lector: Option<Arc<Lector>>,
+    /// §15.9: a dónde van las decisiones si `record_decisions` está encendido.
+    /// `None` es el default: sin almacén del producto no se guarda nada, ni con
+    /// la bandera encendida.
+    pub decisiones: Option<Arc<dyn SinkDecisiones>>,
     /// El sí explícito del usuario a que este pedido salga del equipo. Sin él,
     /// ninguna policy manda nada a una API (§15.2 del plan).
     pub consentimiento_api: bool,
@@ -96,6 +101,7 @@ impl Montaje {
             ejecutor_tools: None,
             ejecutor_comandos: None,
             lector: None,
+            decisiones: None,
             consentimiento_api: false,
         }
     }
@@ -141,6 +147,7 @@ pub struct Brain {
     ejecutor_comandos: Option<Arc<dyn crate::verification::execution::Ejecutor>>,
     lector: Option<Arc<Lector>>,
     bitacora: Mutex<Bitacora>,
+    decisiones: Option<Arc<dyn SinkDecisiones>>,
     consentimiento_api: bool,
 }
 
@@ -193,6 +200,7 @@ impl Brain {
             ejecutor_comandos: m.ejecutor_comandos,
             lector: m.lector,
             bitacora: Mutex::new(bitacora),
+            decisiones: m.decisiones,
             consentimiento_api: m.consentimiento_api,
         })
     }
@@ -639,6 +647,12 @@ impl Brain {
             }
 
             let (clase, porque) = match &verificacion {
+                // El aviso del proveedor manda sobre el verificador: un JSON
+                // cortado falla el formato, pero la causa es el techo.
+                _ if g.truncado => (
+                    FailureClass::Truncado,
+                    format!("el proveedor cortó la salida en el techo de {} tokens", plan.max_output_tokens),
+                ),
                 VerificationResult::Fail { clase, motivo } => (*clase, motivo.clone()),
                 _ => (FailureClass::Formato, "sin clase".to_string()),
             };
@@ -849,7 +863,25 @@ impl Brain {
                 o.clone(),
             ));
         }
-        let armado = context::armar(piezas, plan.context_budget_tokens, self.contador.as_ref());
+        // §XII: si este turno acaba en una API, lo marcado como sensible se queda
+        // en el equipo y se registra con su motivo. Se descansa el presupuesto:
+        // lo que ocupaba esa pieza pasa a lo demás, no se tira.
+        let (piezas, sensible_fuera) = if plan.execution_target == crate::api::vocab::ExecutionTarget::Api {
+            crate::context::fuera_del_equipo(piezas)
+        } else {
+            (piezas, Vec::new())
+        };
+        let mut armado = if self.config.flags.bm25_contexto {
+            context::armar_por_relevancia(
+                piezas,
+                plan.context_budget_tokens,
+                &req.message,
+                self.contador.as_ref(),
+            )
+        } else {
+            context::armar(piezas, plan.context_budget_tokens, self.contador.as_ref())
+        };
+        armado.rechazadas.extend(sensible_fuera);
         let system = self.system_de(req, &plan.tools);
         let ctx = armado.a_contexto(system.clone());
         let turno = crate::prompt::dynamic::texto_del_turno(&ctx, &req.message);
@@ -894,6 +926,7 @@ impl Brain {
             temperature: 0.0,
             seed: 42,
             timeout_s: plan.timeout_s,
+            salida_json: plan.output_contract == crate::api::vocab::OutputContract::Json,
         };
         if opts.eventos.is_some() {
             let mut stream = proveedor.stream(g).await.map_err(con_error)?;
@@ -1289,6 +1322,30 @@ impl Brain {
         reg.reintentos = r.metrics.reintentos;
         reg.coste = r.metrics.coste;
         reg.reason = plan.reason.clone();
+        // §15.9: el dataset de decisiones, si el producto lo pidió y puso
+        // almacén. Va **antes** de la bitácora porque un bloqueo de la bitácora
+        // no tiene por qué tragarse el registro del usuario.
+        if self.config.flags.record_decisiones {
+            if let Some(s) = &self.decisiones {
+                s.guarda(&RegistroDecision {
+                    producto: req.product.clone(),
+                    modo: format!("{:?}", req.mode).to_lowercase(),
+                    // Redactado antes de salir del Brain: el dataset no puede
+                    // acabar teniendo una clave que el usuario escribió a mano.
+                    mensaje: crate::security::redact::texto(&req.message),
+                    intent: format!("{:?}", plan.intent).to_lowercase(),
+                    nivel: format!("{:?}", plan.level),
+                    riesgo: format!("{:?}", plan.risk),
+                    contrato: format!("{:?}", plan.output_contract),
+                    verificacion: r.verification.etiqueta().to_string(),
+                    modelo: plan.model.clone(),
+                    proveedor: plan.provider.clone(),
+                    local: plan.execution_target == crate::api::vocab::ExecutionTarget::Local,
+                    resultado: format!("{:?}", r.output.status),
+                    motivo_plan: plan.reason.clone(),
+                });
+            }
+        }
         let mut b = match self.bitacora.lock() {
             Ok(b) => b,
             Err(_) => return,

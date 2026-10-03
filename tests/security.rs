@@ -285,6 +285,7 @@ fn sin_credencial_el_error_no_suelta_ninguna_clave() {
         temperature: 0.0,
         seed: 42,
         timeout_s: 30,
+        salida_json: false,
     };
     // El cuerpo que se armaría no incluye la cabecera de autenticación.
     let c = hatboo_brain::providers::OpenAiProvider::cuerpo_de(&g, "openai");
