@@ -103,6 +103,11 @@ struct Opciones {
     /// los 1500 MB de §11 no dejan cargar nada. No cambia el producto.
     margen: Option<u64>,
     salida: Option<PathBuf>,
+    /// `--comparar A B`: los dos volcados de `--salida` (baseline y brain) que se
+    /// enfrentan con las reglas de §9. No necesita config ni modelo.
+    comparar: Option<(PathBuf, PathBuf)>,
+    /// Donde se escribe el informe en markdown del `--comparar`.
+    informe: Option<PathBuf>,
 }
 
 impl Default for Opciones {
@@ -121,6 +126,8 @@ impl Default for Opciones {
             contexto: None,
             margen: None,
             salida: None,
+            comparar: None,
+            informe: None,
         }
     }
 }
@@ -144,6 +151,10 @@ brain-bench — arnés de medición del Brain (§9)
                       estructurada; escribe models.sondeado.json
   --decisiones        solo el Engine sobre la suite: precisión de nivel, riesgo,
                       contrato, tools y presupuesto firmado. Sin modelo, sin RAM.
+  --comparar A B      enfrenta dos volcados de --salida (el de `baseline` y el de
+                      `brain`) con las reglas de §9: medianas, umbral de regresión
+                      del 5 % y por qué a veces no se puede afirmar nada.
+  --informe RUTA      con --comparar, escribe el veredicto en markdown ahí.
 ";
 
 fn parseo() -> Result<Opciones, String> {
@@ -207,6 +218,15 @@ fn parseo() -> Result<Opciones, String> {
             "--salida" => {
                 let v = val!("--salida");
                 o.salida = Some(PathBuf::from(v));
+            }
+            "--comparar" => {
+                let a = val!("--comparar");
+                let b = val!("segundo fichero de --comparar");
+                o.comparar = Some((PathBuf::from(a), PathBuf::from(b)));
+            }
+            "--informe" => {
+                let v = val!("--informe");
+                o.informe = Some(PathBuf::from(v));
             }
             "--ayuda" | "-h" => return Err("AYUDA".into()),
             otro => return Err(format!("opción desconocida «{otro}»")),
@@ -614,7 +634,8 @@ fn comprobar_entrada(
 
 // ───────────────────────────────── corridas ─────────────────────────────────
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct Corrida {
     entrada: String,
     categoria: String,
@@ -680,6 +701,15 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    // `--comparar` solo lee dos JSON que ya están escritos: no necesita config,
+    // ni modelo, ni RAM, así que se resuelve antes que todo eso.
+    if let Some((a, b)) = opts.comparar.clone() {
+        if let Err(e) = comparar(&a, &b, opts.informe.as_deref()) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let config = match Cargada::leer(Some(&opts.config)) {
         Ok(c) => c,
         Err(e) => {
@@ -1593,5 +1623,253 @@ async fn prueba_pensamiento(ollama: &Arc<OllamaProvider>, id: &str) -> (bool, St
             (algo, motivo)
         }
         Err(e) => (false, e.to_string()),
+    }
+}
+
+// ─────────────────────── comparar: el veredicto de §9 ───────────────────────
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct Volcado {
+    modo: String,
+    reps: u32,
+    split: String,
+    brain_version: String,
+    corridas: Vec<Corrida>,
+}
+
+/// Lo que se le compara a un bando. Todo en **mediana**: medido el 30-09, dos
+/// pasadas de la misma petición se desviaron +34 % / −11 % en el total y ±44 %
+/// en TTFT, así que afirmar algo con una corrida sería vender ruido.
+#[derive(Debug, Default, Clone)]
+struct Bando {
+    modelo: String,
+    entradas: usize,
+    duracion_ms: f64,
+    ttft_ms: f64,
+    tokens_salida: f64,
+    recargas: f64,
+    reintentos: f64,
+    pasa: usize,
+    falla: usize,
+    sin_comprobar: usize,
+    verificados: usize,
+}
+
+/// Dos medianas seguidas: primero entre las repeticiones de una misma entrada,
+/// después entre entradas. Si no, una categoría con seis repeticiones pesaría
+/// más que una con una.
+fn bando_de(corridas: &[Corrida]) -> Bando {
+    let mut por_entrada: std::collections::BTreeMap<&str, Vec<&Corrida>> = Default::default();
+    for c in corridas {
+        por_entrada.entry(c.entrada.as_str()).or_default().push(c);
+    }
+    let de = |pick: &dyn Fn(&Corrida) -> f64| -> f64 {
+        let por: Vec<f64> = por_entrada
+            .values()
+            .map(|g| mediana(&g.iter().map(|c| pick(c)).collect::<Vec<_>>()))
+            .collect();
+        mediana(&por)
+    };
+    let cuenta = |etiqueta: &str| corridas.iter().filter(|c| c.resultado == etiqueta).count();
+    // Los contadores van en **suma** (suma de las medianas por entrada), no en
+    // mediana: una recarga en una de cuatro entradas es una recarga pagada, y la
+    // mediana la convertiría en cero.
+    let total = |pick: &dyn Fn(&Corrida) -> f64| -> f64 {
+        por_entrada
+            .values()
+            .map(|g| mediana(&g.iter().map(|c| pick(c)).collect::<Vec<_>>()))
+            .sum()
+    };
+    Bando {
+        modelo: corridas.first().map(|c| c.modelo.clone()).unwrap_or_default(),
+        entradas: por_entrada.len(),
+        duracion_ms: de(&|c| c.duracion_ms as f64),
+        ttft_ms: de(&|c| c.ttft_ms.unwrap_or(0) as f64),
+        tokens_salida: de(&|c| c.tokens_salida.unwrap_or(0) as f64),
+        recargas: total(&|c| c.recargas as f64),
+        reintentos: total(&|c| c.reintentos as f64),
+        pasa: cuenta("pasa"),
+        falla: cuenta("falla"),
+        sin_comprobar: cuenta("sin_comprobar"),
+        verificados: corridas.iter().filter(|c| c.estado_salida == "Verificado").count(),
+    }
+}
+
+/// Porcentaje de `b` respecto de `a`. `None` cuando no hay base con la que
+/// comparar, que es distinto de «cero por ciento».
+fn delta(a: f64, b: f64) -> Option<f64> {
+    if !a.is_finite() || !b.is_finite() || a == 0.0 {
+        return None;
+    }
+    Some((b - a) / a * 100.0)
+}
+
+/// El veredicto de una métrica de coste. §1 fija el umbral en 5 % y §9 lo pide
+/// sobre medianas de al menos tres repeticiones: con menos, la respuesta honesta
+/// es que no se puede afirmar nada.
+fn veredicto(a: f64, b: f64, reps: u32) -> &'static str {
+    if reps < 3 {
+        return "sin afirmar (faltan repeticiones)";
+    }
+    match delta(a, b) {
+        None => "sin base",
+        Some(d) if d > 5.0 => "REGRESIÓN",
+        Some(d) if d < -5.0 => "mejora",
+        Some(_) => "dentro del ruido",
+    }
+}
+
+fn por_modelo(v: &Volcado) -> std::collections::BTreeMap<String, Bando> {
+    let mut m: std::collections::BTreeMap<String, Vec<Corrida>> = Default::default();
+    for c in &v.corridas {
+        m.entry(c.modelo.clone()).or_default().push(c.clone());
+    }
+    m.into_iter().map(|(modelo, g)| {
+        let mut b = bando_de(&g);
+        if b.modelo.is_empty() {
+            b.modelo = modelo.clone();
+        }
+        (modelo, b)
+    }).collect()
+}
+
+fn linea(nombre: &str, a: f64, b: f64, reps: u32) -> String {
+    let d = delta(a, b).map(|x| format!("{x:+.1} %")).unwrap_or_else(|| "—".into());
+    format!(
+        "  {nombre:<14} {a:>12.0} → {b:>12.0}   {d:>10}   {}",
+        veredicto(a, b, reps)
+    )
+}
+
+fn leer_volcado(ruta: &Path) -> Result<Volcado, String> {
+    let texto = std::fs::read_to_string(ruta).map_err(|e| format!("{}: {e}", ruta.display()))?;
+    serde_json::from_str(&texto)
+        .map_err(|e| format!("{} no es un volcado del arnés: {e}", ruta.display()))
+}
+
+/// El paso que faltaba: §9 no se cumple corriendo una vez, se cumple enfrentando
+/// dos volcados y diciendo en qué caso no se puede afirmar nada.
+fn comparar(a_ruta: &Path, b_ruta: &Path, informe: Option<&Path>) -> Result<(), String> {
+    let a = leer_volcado(a_ruta)?;
+    let b = leer_volcado(b_ruta)?;
+    if a.corridas.is_empty() || b.corridas.is_empty() {
+        return Err("uno de los dos volcados no tiene corridas".into());
+    }
+    let (ba, bb) = (por_modelo(&a), por_modelo(&b));
+    let reps = a.reps.min(b.reps);
+    let mut md = String::new();
+    md.push_str("# Baseline vs Brain (§9)\n\n");
+    md.push_str(&format!(
+        "- ficheros: `{}` (modo {}, {} reps, split {}) · `{}` (modo {}, {} reps, split {})\n",
+        a_ruta.display(), a.modo, a.reps, a.split,
+        b_ruta.display(), b.modo, b.reps, b.split,
+    ));
+    md.push_str(&format!(
+        "- brain_version: `{}` vs `{}`\n",
+        if a.brain_version.is_empty() { "?" } else { &a.brain_version },
+        if b.brain_version.is_empty() { "?" } else { &b.brain_version },
+    ));
+    md.push_str("- umbral de regresión 5 % sobre medianas; con menos de 3 repeticiones **no se afirma nada** (ruido medido por corrida: +34 % / −11 %).\n\n");
+
+    let mut regresiones = 0;
+    let mut mejoras = 0;
+    for (modelo, bando_a) in &ba {
+        let Some(bando_b) = bb.get(modelo) else {
+            println!("· {modelo}: solo está en un fichero, no hay con qué comparar.");
+            md.push_str(&format!("- **{modelo}**: solo en un fichero.\n"));
+            continue;
+        };
+        println!("\n== {modelo} · {} entradas vs {} entradas", bando_a.entradas, bando_b.entradas);
+        md.push_str(&format!("## {modelo}\n\n```text\n"));
+        for (nombre, x, y) in [
+            ("duración ms", bando_a.duracion_ms, bando_b.duracion_ms),
+            ("ttft ms", bando_a.ttft_ms, bando_b.ttft_ms),
+            ("tokens salida", bando_a.tokens_salida, bando_b.tokens_salida),
+            ("recargas total", bando_a.recargas, bando_b.recargas),
+            ("reintentos tot", bando_a.reintentos, bando_b.reintentos),
+        ] {
+            let l = linea(nombre, x, y, reps);
+            println!("{l}");
+            if l.ends_with("REGRESIÓN") {
+                regresiones += 1;
+            } else if l.ends_with("mejora") {
+                mejoras += 1;
+            }
+            md.push_str(&format!("{l}\n"));
+        }
+        let calidad = format!(
+            "  {:<14} {:>12} → {:>12}",
+            "checks ✓/✗/—",
+            format!("{} / {} / {}", bando_a.pasa, bando_a.falla, bando_a.sin_comprobar),
+            format!("{} / {} / {}", bando_b.pasa, bando_b.falla, bando_b.sin_comprobar),
+        );
+        let verif = format!(
+            "  {:<14} {:>12} → {:>12}",
+            "Verificado", bando_a.verificados, bando_b.verificados
+        );
+        println!("{calidad}\n{verif}");
+        md.push_str(&format!("{calidad}\n{verif}\n```\n\n"));
+    }
+    println!(
+        "\nVeredicto: {regresiones} métricas por encima del umbral y {mejoras} por debajo, sobre {reps} repeticiones compartidas."
+    );
+    if reps < 3 {
+        println!("Con menos de 3 repeticiones esto es lectura, no veredicto: corre `--reps 3`.");
+    }
+    md.push_str(&format!(
+        "**Veredicto**: {regresiones} métricas por encima del umbral y {mejoras} por debajo, sobre {reps} repeticiones compartidas.\n"
+    ));
+    if let Some(ruta) = informe {
+        std::fs::write(ruta, md).map_err(|e| format!("no se pudo escribir el informe: {e}"))?;
+        println!("informe en {}", ruta.display());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_comparar {
+    use super::*;
+
+    fn c(j: serde_json::Value) -> Corrida {
+        serde_json::from_value(j).unwrap()
+    }
+
+    #[test]
+    fn el_delta_no_inventa_una_base() {
+        assert_eq!(delta(100.0, 105.0), Some(5.0));
+        assert_eq!(delta(0.0, 10.0), None, "dividir por cero no es un 0 %");
+        assert_eq!(delta(100.0, f64::NAN), None);
+    }
+
+    /// La regla que más se rompe al mirar números: sin tres repeticiones no hay
+    /// veredicto, por muy bonito que salga el porcentaje.
+    #[test]
+    fn con_pocas_repeticiones_no_se_afirma_nada() {
+        assert_eq!(veredicto(100.0, 60.0, 1), "sin afirmar (faltan repeticiones)");
+        assert_eq!(veredicto(100.0, 60.0, 3), "mejora");
+        assert_eq!(veredicto(100.0, 140.0, 3), "REGRESIÓN");
+        assert_eq!(veredicto(100.0, 102.0, 3), "dentro del ruido");
+        assert_eq!(veredicto(0.0, 5.0, 3), "sin base");
+    }
+
+    #[test]
+    fn el_bando_promedia_por_entrada_no_por_repeticion() {
+        // Una entrada con tres reps y otra con una: si se promediara por corrida,
+        // la primera pesaría el triple.
+        let corridas = vec![
+            c(serde_json::json!({"modelo":"m","entrada":"a","duracion_ms":100,"tokens_salida":10,"resultado":"pasa","estado_salida":"Verificado"})),
+            c(serde_json::json!({"modelo":"m","entrada":"a","duracion_ms":900,"tokens_salida":10,"resultado":"pasa","estado_salida":"Verificado"})),
+            c(serde_json::json!({"modelo":"m","entrada":"a","duracion_ms":500,"tokens_salida":10,"resultado":"falla","estado_salida":"Propuesto"})),
+            c(serde_json::json!({"modelo":"m","entrada":"b","duracion_ms":60,"tokens_salida":4,"recargas":1,"resultado":"sin_comprobar","estado_salida":"Propuesto"})),
+        ];
+        let b = bando_de(&corridas);
+        assert_eq!(b.entradas, 2);
+        assert_eq!(b.duracion_ms, 280.0, "mediana de las medianas [500, 60]");
+        // La recarga pasó en una de dos entradas: contada como mediana sería 0,5
+        // y en la pantalla «no hubo recargas». Es una recarga pagada.
+        assert_eq!(b.recargas, 1.0, "los contadores van en suma");
+        assert_eq!((b.pasa, b.falla, b.sin_comprobar), (2, 1, 1));
+        assert_eq!(b.verificados, 2);
     }
 }
