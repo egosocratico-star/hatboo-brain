@@ -72,13 +72,28 @@ impl OllamaProvider {
             "stream": true,
             "options": {
                 "num_ctx": req.num_ctx,
-                "temperature": req.temperature,
-                "seed": req.seed,
                 // Con `think: true` Ollama gasta el razonamiento dentro de
                 // `num_predict`, así que el techo es la suma que firmó el Plan.
                 "num_predict": req.tope_de_generacion(),
             }
         });
+        // `temperature` y `seed` solo viajan si el producto los pidió: mandarlos
+        // siempre era fijar el muestreo de todas las conversaciones.
+        if let Some(t) = req.temperature {
+            cuerpo["options"]["temperature"] = serde_json::json!(t);
+        }
+        if let Some(s) = req.seed {
+            cuerpo["options"]["seed"] = serde_json::json!(s);
+        }
+        // Fase 6, medido el 04-10 contra el Ollama de esta máquina: `/api/chat`
+        // con `logprobs: true` contesta en **cada chunk** del stream un
+        // `logprobs:[{token,logprob,bytes,top_logprobs:[…]}]`, y el chunk final
+        // (`done: true`) no trae ninguno. Con `top_logprobs: 1` solo viene el
+        // token elegido, que es lo que hace falta para la media.
+        if req.logprobs {
+            cuerpo["options"]["logprobs"] = serde_json::json!(true);
+            cuerpo["options"]["top_logprobs"] = serde_json::json!(1);
+        }
 
         match req.keep_alive {
             KeepAlive::PorDefecto => {}
@@ -178,6 +193,7 @@ impl OllamaProvider {
         let mut carga = None;
         let mut decode = None;
         let mut truncado = false;
+        let mut registros: Vec<f32> = Vec::new();
         for l in lineas {
             if let Some(m) = l.get("model").and_then(|v| v.as_str()) {
                 modelo = m.to_string();
@@ -211,6 +227,13 @@ impl OllamaProvider {
                     }
                 }
             }
+            if let Some(lp) = l.get("logprobs").and_then(|v| v.as_array()) {
+                for e in lp {
+                    if let Some(v) = e.get("logprob").and_then(|x| x.as_f64()) {
+                        registros.push(v as f32);
+                    }
+                }
+            }
             if l.get("done").and_then(|v| v.as_bool()) == Some(true) {
                 let (e, s, c, d) = Self::cuentas(l);
                 entrada = e;
@@ -241,6 +264,7 @@ impl OllamaProvider {
             tok_s,
             carga_ms: carga,
             truncado,
+            logprob_medio: super::media_logprobs(&registros),
         }
     }
 }
@@ -617,8 +641,9 @@ mod tests {
             keep_alive: KeepAlive::Segundos(300),
             thinking: ThinkingLevel::Off,
             max_output_tokens: 512,
-            temperature: 0.0,
-            seed: 42,
+            temperature: Some(0.0),
+            seed: Some(42),
+            logprobs: false,
             timeout_s: 60,
             salida_json: false,
         }
@@ -651,6 +676,59 @@ mod tests {
         assert_eq!(c["messages"][0]["role"], "system");
         assert!(c["tools"].as_array().unwrap().len() == 1);
         assert!(c.get("think").is_none(), "off no manda think");
+    }
+
+    /// El muestreo lo decide el producto, no el crate. Con `None` la clave no
+    /// llega al cuerpo —Ollama aplica su defecto, 0,8—, y solo aparece cuando
+    /// alguien la pidió, que es el caso del banco de medidas con 0 y 42. Estuvo
+    /// fijado en el runtime: un chat con un modelo de 1B repetía la misma frase
+    /// literal turno tras turno.
+    #[test]
+    fn sin_temperatura_pedida_no_se_manda_temperatura() {
+        let mut r = req();
+        r.temperature = None;
+        r.seed = None;
+        let c = OllamaProvider::cuerpo_de(&r);
+        assert!(c["options"].get("temperature").is_none(), "el crate no fija el muestreo");
+        assert!(c["options"].get("seed").is_none(), "tampoco la semilla");
+        // Quitar eso no puede llevarse el resto del Plan por delante.
+        assert_eq!(c["options"]["num_ctx"], 4096);
+        assert_eq!(c["options"]["num_predict"], 512);
+
+        let con = OllamaProvider::cuerpo_de(&req());
+        assert_eq!(con["options"]["temperature"], 0.0);
+        assert_eq!(con["options"]["seed"], 42);
+    }
+
+    /// Fase 6, contra la forma que devolvió el Ollama de esta máquina el 04-10:
+    /// cada chunk del stream trae `logprobs:[{token,logprob,…}]` y el `done:true`
+    /// no trae ninguno.
+    #[test]
+    fn los_logprobs_del_stream_salen_en_una_media() {
+        let mut r = req();
+        r.logprobs = true;
+        let c = OllamaProvider::cuerpo_de(&r);
+        assert_eq!(c["options"]["logprobs"], true);
+        assert_eq!(c["options"]["top_logprobs"], 1);
+        assert!(
+            OllamaProvider::cuerpo_de(&req())["options"].get("logprobs").is_none(),
+            "con la fase apagada no se le pide nada al servidor"
+        );
+
+        let lineas = vec![
+            serde_json::json!({"model":"gemma3:1b","message":{"content":"a"},"done":false,
+                "logprobs":[{"token":"a","logprob":-0.4}]}),
+            serde_json::json!({"model":"gemma3:1b","message":{"content":"b"},"done":false,
+                "logprobs":[{"token":"b","logprob":-0.8}]}),
+            serde_json::json!({"model":"gemma3:1b","message":{"content":""},"done":true,"eval_count":2}),
+        ];
+        let g = OllamaProvider::juntar(&lineas);
+        let media = g.logprob_medio.expect("la media de los dos tokens");
+        assert!((media + 0.6).abs() < 1e-6, "media {media}, esperado -0,6");
+
+        // Un stream sin logprobs no es un modelo segurísimo: es None.
+        let sin = serde_json::json!({"model":"g","message":{"content":"x"},"done":true});
+        assert_eq!(OllamaProvider::juntar(&[sin]).logprob_medio, None);
     }
 
     #[test]

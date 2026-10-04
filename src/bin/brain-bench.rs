@@ -985,6 +985,8 @@ async fn una_corrida(
             tokens_salida: r.tokens_salida,
             tok_s: r.tok_s,
             ram_mb: None,
+            logprob_medio: r.logprob_medio,
+            probabilidad: hatboo_brain::providers::exp_de_logprob(r.logprob_medio),
             recargas: 0,
             reintentos: 0,
             contexto_rechazado: 0,
@@ -1095,8 +1097,13 @@ async fn llama_directo(
         keep_alive: KeepAlive::Segundos(300),
         thinking: ThinkingLevel::Off,
         max_output_tokens: opts.limite_salida,
-        temperature: 0.0,
-        seed: 42,
+        // El protocolo de la Fase 0: temperatura 0 y semilla fija para que el
+        // recuento de tokens sea idéntico corrida a corrida. Es del banco de
+        // medidas, no del runtime (allí `BrainConfig` manda, y su defecto es no
+        // mandar nada).
+        temperature: Some(0.0),
+        seed: Some(42),
+        logprobs: false,
         timeout_s: 300,
         salida_json: false,
     };
@@ -1134,6 +1141,12 @@ fn arma_brain(
     }
     let mut cfg = BrainConfig {
         dir_config: Some(opts.config.clone()),
+        // El banco mide con el muestreo atado (temperature 0 y semilla 42: el
+        // protocolo de la Fase 0, medido — el recuento de tokens sale idéntico
+        // corrida a corrida). Un producto normal no los pone: su defecto es `None`,
+        // que es no mandar la clave.
+        temperatura: Some(0.0),
+        semilla: Some(42),
         ..Default::default()
     };
     if let Some(ctx) = opts.contexto {
@@ -1502,8 +1515,9 @@ async fn carga_y_medir(
         keep_alive: KeepAlive::Segundos(120),
         thinking: ThinkingLevel::Off,
         max_output_tokens: toks,
-        temperature: 0.0,
-        seed: 42,
+        temperature: Some(0.0),
+        seed: Some(42),
+        logprobs: false,
         timeout_s: 300,
         salida_json: false,
     };
@@ -1539,8 +1553,9 @@ async fn prueba_tool(ollama: &Arc<OllamaProvider>, id: &str) -> (bool, String) {
         keep_alive: KeepAlive::Segundos(120),
         thinking: ThinkingLevel::Off,
         max_output_tokens: 128,
-        temperature: 0.0,
-        seed: 42,
+        temperature: Some(0.0),
+        seed: Some(42),
+        logprobs: false,
         timeout_s: 300,
         salida_json: false,
     };
@@ -1562,8 +1577,9 @@ async fn prueba_pensamiento(ollama: &Arc<OllamaProvider>, id: &str) -> (bool, St
         keep_alive: KeepAlive::Segundos(120),
         thinking: ThinkingLevel::Low,
         max_output_tokens: 256,
-        temperature: 0.0,
-        seed: 42,
+        temperature: Some(0.0),
+        seed: Some(42),
+        logprobs: false,
         timeout_s: 300,
         salida_json: false,
     };

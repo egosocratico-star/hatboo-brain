@@ -77,28 +77,43 @@ impl OpenAiProvider {
             // conteo sale `None`, y el log anota el turno como si hubiera salido
             // gratis.
             "stream_options": { "include_usage": true },
-            "temperature": req.temperature,
-            // En `/chat/completions` el tope de salida es `max_tokens`; con
-            // razonamiento encendido los modelos nuevos solo aceptan
-            // `max_completion_tokens`, y las dos claves a la vez son un 400
-            // («both max_tokens and max_completion_tokens are not supported»), así
-            // que se manda **una** u otra según el `thinking` firmado.
-            //
-            // En la que sea va la SUMA (respuesta + razonamiento reservado): en
-            // esta API los tokens de razonamiento salen del mismo tope que la
-            // respuesta. `max_output_tokens` es de otra API y aquí se ignoraría en
-            // silencio, dejando el Plan sin su presupuesto.
-            "temperature": req.temperature,
         });
+        // En `/chat/completions` el tope de salida es `max_tokens`; con
+        // razonamiento encendido los modelos nuevos solo aceptan
+        // `max_completion_tokens`, y las dos claves a la vez son un 400
+        // («both max_tokens and max_completion_tokens are not supported»), así
+        // que se manda **una** u otra según el `thinking` firmado.
+        //
+        // En la que sea va la SUMA (respuesta + razonamiento reservado): en
+        // esta API los tokens de razonamiento salen del mismo tope que la
+        // respuesta. `max_output_tokens` es de otra API y aquí se ignoraría en
+        // silencio, dejando el Plan sin su presupuesto.
+        //
+        // `temperature` y `seed` viajan solo si el producto los puso; antes se
+        // mandaban siempre, y la clave duplicada del macro quedaba en 0,0 para
+        // todas las conversaciones.
+        if let Some(t) = req.temperature {
+            cuerpo["temperature"] = serde_json::json!(t);
+        }
+        // `seed` lo admiten OpenAI y la mayoría de puertas compatibles; si una no
+        // lo conoce, el error viene en el status y se reporta.
+        if let Some(s) = req.seed {
+            cuerpo["seed"] = serde_json::json!(s);
+        }
+        // Fase 6. `top_logprobs: 0` porque solo se pide el logprob del token
+        // elegido; con `logprobs: true` la puerta compatible OpenAI responde en
+        // `choices[0].logprobs.content`, igual en el stream que en la respuesta
+        // suelta.
+        if req.logprobs {
+            cuerpo["logprobs"] = serde_json::json!(true);
+            cuerpo["top_logprobs"] = serde_json::json!(0);
+        }
         let tope = serde_json::json!(req.tope_de_generacion());
         if req.thinking != ThinkingLevel::Off {
             cuerpo["max_completion_tokens"] = tope;
         } else {
             cuerpo["max_tokens"] = tope;
         }
-        // `seed` lo admiten OpenAI y la mayoría de puertas compatibles; si una no
-        // lo conoce, el error viene en el status y se reporta.
-        cuerpo["seed"] = serde_json::json!(req.seed);
         // Contrato `Json` del Plan. OpenAI y las puertas compatibles piden el
         // objeto con `response_format`; el `json_schema` ceñido no se manda: no
         // hay ningún esquema en el Plan que lo alimente todavía.
@@ -182,6 +197,16 @@ impl OpenAiProvider {
             // `"length"` = lo paró el techo; `"stop"` = terminó el modelo.
             truncado: j.pointer("/choices/0/finish_reason").and_then(|v| v.as_str())
                 == Some("length"),
+            logprob_medio: super::media_logprobs(
+                &j.pointer("/choices/0/logprobs/content")
+                    .and_then(|v| v.as_array())
+                    .map(|cs| {
+                        cs.iter()
+                            .filter_map(|c| c.get("logprob").and_then(|v| v.as_f64()).map(|l| l as f32))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            ),
         }
     }
 }
@@ -387,8 +412,9 @@ mod tests {
             keep_alive: KeepAlive::PorDefecto,
             thinking: ThinkingLevel::Off,
             max_output_tokens: 512,
-            temperature: 0.0,
-            seed: 42,
+            temperature: Some(0.0),
+            seed: Some(42),
+            logprobs: false,
             timeout_s: 60,
             salida_json: false,
         }

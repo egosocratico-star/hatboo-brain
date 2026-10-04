@@ -44,10 +44,19 @@ pub struct GenerationRequest {
     pub keep_alive: KeepAlive,
     pub thinking: ThinkingLevel,
     pub max_output_tokens: u32,
-    /// Fijos para que el bench sea reproducible. Medido: con temperature 0 y seed
-    /// 42 el recuento de tokens sale idéntico corrida a corrida.
-    pub temperature: f32,
-    pub seed: u64,
+    /// Los manda el producto por `BrainConfig` (`temperatura` / `semilla`).
+    /// `None` = **no se manda la clave**, que es lo que hace un chat normal: deja
+    /// decidir al proveedor (Ollama usa 0,8 por defecto). `Some(0.0)` con
+    /// `Some(42)` es el protocolo de la Fase 0, medido: el recuento de tokens sale
+    /// idéntico corrida a corrida. Estuvo fijo en el runtime, y un chat con un
+    /// modelo de 1B en decodificación voraz repite la misma frase literal.
+    pub temperature: Option<f32>,
+    pub seed: Option<u64>,
+    /// Fase 6. `true` pide al proveedor los log-probabilities de lo que genera, y
+    /// el resultado devuelve `logprob_medio`. No cambia ninguna decisión: §1 del
+    /// plan deja el origen estadístico en **solo registro** hasta que haya
+    /// calibración medida, y ningún origen revierte un Pass/Fail determinista.
+    pub logprobs: bool,
     pub timeout_s: u32,
     /// El Plan firmó un contrato `Json`. No es un capricho del prompt: en Ollama
     /// es la diferencia entre que `gemma3:1b` devuelva ```` ```json ```` envuelto
@@ -70,8 +79,9 @@ impl GenerationRequest {
             keep_alive: KeepAlive::PorDefecto,
             thinking: ThinkingLevel::Off,
             max_output_tokens: 512,
-            temperature: 0.0,
-            seed: 42,
+            temperature: None,
+            seed: None,
+            logprobs: false,
             timeout_s: 60,
             salida_json: false,
         }
@@ -120,6 +130,28 @@ pub struct GenerationResult {
     /// podían salir bien.
     #[serde(default)]
     pub truncado: bool,
+    /// Fase 6: media de los log-probabilities de los tokens generados, en nats
+    /// (negativos; 0 sería certeza absoluta). `None` = el proveedor no los mandó
+    /// o no los tiene. Para la probabilidad del turno, `exp_de_logprob`.
+    #[serde(default)]
+    pub logprob_medio: Option<f32>,
+}
+
+/// Media de una lista de log-probabilities. `None` con la lista vacía: un
+/// proveedor que no mandó nada no es un modelo seguro de salida 0.
+pub fn media_logprobs(valores: &[f32]) -> Option<f32> {
+    if valores.is_empty() {
+        return None;
+    }
+    let suma: f32 = valores.iter().sum();
+    Some(suma / valores.len() as f32)
+}
+
+/// La probabilidad que corresponde a una media de log-probabilities: la media
+/// geométrica de las probabilidades por token. No es la probabilidad de que la
+/// respuesta sea cierta, y no se vende como tal.
+pub fn exp_de_logprob(logprob_medio: Option<f32>) -> Option<f32> {
+    logprob_medio.map(|l| l.exp())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -262,7 +294,21 @@ pub(crate) fn json_de_sse(eventos: &[serde_json::Value]) -> serde_json::Value {
     let mut modelo = String::new();
     let mut uso = serde_json::json!({});
     let mut fin = String::new();
+    // Fase 6: cada chunk puede traer `choices[0].logprobs.content` con los
+    // log-probabilities de sus tokens. Se cosen en el objeto único que consume
+    // `interpretar`, igual que se cose el texto.
+    let mut registros: Vec<f32> = Vec::new();
     for e in eventos {
+        if let Some(cs) = e
+            .pointer("/choices/0/logprobs/content")
+            .and_then(|v| v.as_array())
+        {
+            for c in cs {
+                if let Some(l) = c.get("logprob").and_then(|v| v.as_f64()) {
+                    registros.push(l as f32);
+                }
+            }
+        }
         if let Some(m) = e.get("model").and_then(|v| v.as_str()) {
             modelo = m.to_string();
         }
@@ -325,6 +371,14 @@ pub(crate) fn json_de_sse(eventos: &[serde_json::Value]) -> serde_json::Value {
         mensaje["tool_calls"] = serde_json::Value::Array(llamadas);
     }
     let mut v = serde_json::json!({"choices":[{"message":mensaje}]});
+    if !registros.is_empty() {
+        v["choices"][0]["logprobs"] = serde_json::json!({
+            "content": registros
+                .iter()
+                .map(|l| serde_json::json!({"logprob": l}))
+                .collect::<Vec<_>>()
+        });
+    }
     if !fin.is_empty() {
         // Sin esta línea el stream perdía el aviso: `interpretar` mira
         // `finish_reason` para saber si la salida la cortó el techo.

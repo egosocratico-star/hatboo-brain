@@ -61,6 +61,15 @@ pub struct TaskMetrics {
     pub tok_s: Option<f32>,
     /// RAM que el modelo ocupó residente, si se pudo leer.
     pub ram_mb: Option<u64>,
+    /// Fase 6: media de los log-probabilities de los tokens generados, en nats
+    /// (negativos; 0 sería certeza). `None` = no se pidió o el proveedor no los
+    /// manda. Es **registro**, no nota de calidad: §1 deja el origen estadístico
+    /// sin poder revertir un Pass/Fail determinista hasta que haya calibración
+    /// medida, y eso es la Fase 6 sobre el bench, no esto.
+    pub logprob_medio: Option<f32>,
+    /// `exp(logprob_medio)`: la media geométrica de las probabilidades por token.
+    /// No es la probabilidad de que la respuesta sea cierta.
+    pub probabilidad: Option<f32>,
     pub recargas: u32,
     pub reintentos: u8,
     pub contexto_rechazado: u32,

@@ -14,7 +14,7 @@ BrainRequest
   → Fast Path ─ Some ──────────────┐
        └ None → Decision Engine ────┤
                                     ↓
-  Planner + Governor → PLAN firmado (schema 6)
+  Planner + Governor → PLAN firmado (schema 7)
   → Contexto + Tool Gate + Selector
   → Prompt Engine → ModelProvider → Ejecutor del producto
   → Verificar ─ Pass → BrainResult
@@ -62,21 +62,32 @@ reenviar la clave en el cuerpo.
 
 ## Configuración
 
-El producto dice dónde está el directorio de config; se leen tres archivos
+El producto dice dónde está el directorio de config; se leen cuatro archivos
 opcionales:
 
 - `brain-rules.json` — señales y routing. Los nombres de señal, nivel y contrato
   son los del crate (español): `has_file_path`, `N2`, `patch`. `text` se acepta
   como alias de `texto` porque el Canon escribe los contratos en inglés.
+- `tuning.json` — los pesos de la decisión ponderada por costo (§3). Sin archivo
+  los pesos son neutrales (todo a 1,0) y la elección es la de siempre; ponerlos sin
+  medir la Fase 3 sería inventarse un coste.
 - `tools.json` — el catálogo con lo que ofrece el producto, marcando cuáles
   escriben (`max_write_actions` manda sobre esas).
 - `models.json` — lo **medido** en esta máquina. Si no está, se usa
   `models.example.json` y `Cargada::models_desde_ejemplo` queda en `true` para
   que el producto pueda decirlo: las cifras del ejemplo no son de esta máquina.
 
-`config/models.example.json` lleva RAM residente medida con Ollama 0.35 sobre
-8,45 GB sin GPU (Fase 0). Donde solo hay 2048 medido no hay 4096: el Governor
-descarta ese escalón y lo dice, en vez de extrapolar el KV cache.
+Las reglas y el catálogo de tools **viajan dentro del crate** (`Reglas::empotradas()`
+y `Herramientas::empotradas()`, que leen por `include_str!` los JSON de `config/` y
+devuelven error si no parsean, nunca vacío). Ojo con la asimetría: `Cargada::leer()`
+con un directorio sin `brain-rules.json` deja `Reglas` **vacías** — no cae al
+embebido por su cuenta. Un producto empaquetado que no tiene directorio de config
+tiene que pedirlas explícitamente, que es lo que hace Hatboo.
+
+`config/models.example.json` lleva la RAM residente de los siete locales en los tres
+escalones de la escalera (2048 / 4096 / 8192), medida con Ollama 0,35,1 sobre 8,45 GB
+sin GPU. No hay ningún número interpolado. Un `num_ctx` **fuera** de esa escalera sí
+queda sin número: el Governor lo descarta y lo dice, en vez de extrapolar el KV cache.
 
 ## Medir
 
@@ -92,18 +103,38 @@ prueba una tool call y un `think` reales; escribe `models.sondeado.json`.
 entrada sobre una copia limpia del fixture. `--modo baseline` manda el mismo
 system prompt sin administración, que es la línea base que pide §9.
 
+`--decisiones` es la única que no toca el modelo ni la RAM: corre solo el Engine
+sobre la suite y saca precisión de nivel y de riesgo, las bandas de confianza y el
+presupuesto que firma. Filtra por `--split dev|validacion|todos` (por defecto `dev`,
+24 de las 30 entradas). Medida en su portátil: 1,4 ms de media por turno con la
+máquina tranquila, 3,7 ms con una compilación de por medio, y **sale con código 0
+aunque baje la
+precisión**: es lectura, no umbral.
+
 Lo que no se pudo comprobar se reporta como `sin_comprobar`, nunca como acierto.
 
 ## Estado
 
-Compila y pasan las pruebas: 196 unitarias del crate + 9 ficheros de integración
-de §10 (planner, decision, context, resources, prompt, verification, security,
-recovery, golden). Las fases 6 (logprobs) y 7 (backend de decisión tipo Laya) están
-detrás de flags apagados y sin implementar.
+Compila y pasan las pruebas: **350 verdes** — 240 unitarias del crate, 109 en los 9
+ficheros de integración de §10 (context 8 · decision 18 · golden 5 · planner 19 ·
+prompt 9 · recovery 13 · resources 11 · security 10 · verification 16) y 1 doc-test.
+`clippy --all-targets --all-features -D warnings` a cero y **sin un solo `#[allow]`**;
+la misma tanda corre en GitHub (`windows-latest`, rama `main`).
+
+La batería `--decisiones` mide el Engine sobre `benchmarks/base.json`: **24/24 en nivel
+y 24/24 en riesgo** con `--split dev` (lo que corre la CI) y 6/6 con `--split
+validacion`. Ese 100 % es saturación, no virtud: la suite se calibró contra el motor,
+así que hoy sirve como detector de regresiones y no para descubrir cosas — para eso
+hacen falta entradas nuevas. `--decisiones` **sale con código 0 aunque baje la
+precisión**: en la CI es lectura, no umbral.
+
+Sin construir: las fases 6 (logprobs) y 7 (backend de decisión tipo Laya), y no hay
+modo de encenderlas por error — `Brain` rechaza la configuración nombrando el campo
+del JSON y la fase que falta. La Fase 8 (auto-mejora) del Plan v1.4 tampoco está.
 
 Pendiente de medir, no de escribir: la comparación de §9 contra la línea base real
-necesita correr el arnés con un proveedor cargado. Las cifras de RAM de este repo
-son de una máquina; en otra hay que volver a sondear.
+necesita correr el arnés con un proveedor cargado. Las cifras de RAM de este repo son
+de una máquina (8,45 GB sin GPU, Ollama 0,35,1); en otra hay que volver a sondear.
 
 ## Pruebas
 

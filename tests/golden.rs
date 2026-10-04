@@ -271,29 +271,42 @@ fn encender_una_fase_que_no_esta_construida_no_arranca_en_silencio() {
     );
     // El nombre que se comprueba es el que el producto escribe en el JSON
     // (`camelCase`), no el del campo en Rust.
-    for (campo, fase) in [("logprobs", "Fase 6"), ("backendDecision", "Fase 7")] {
-        let mut config = BrainConfig::default();
-        match campo {
-            "logprobs" => config.flags.logprobs = true,
-            _ => config.flags.backend_decision = true,
-        }
-        let montaje = Montaje {
-            config,
+    let mut config = BrainConfig::default();
+    config.flags.backend_decision = true;
+    let s = match Brain::nuevo(Montaje {
+        config,
+        proveedores: vec![mock.clone()],
+        registry: Registry::nuevo(modelos()),
+        reglas: cfg.reglas.clone(),
+        herramientas: cfg.herramientas.clone(),
+        sonda: Arc::new(SondaFija::default()),
+        ..Montaje::de_proveedor(mock.clone())
+    }) {
+        Err(e) => e.mensaje(),
+        Ok(_) => panic!("`backendDecision` es la Fase 7: aquí no hay nada que encender"),
+    };
+    assert!(s.contains("backendDecision"), "el campo no se nombró: {s}");
+    assert!(s.contains("Fase 7"), "el error tiene que decir de qué fase es: {s}");
+    assert!(s.contains("no está construida"), "{s}");
+
+    // La Fase 6 (`logprobs`) se construyó el 04-10: se pide al proveedor, se cose
+    // y se reporta. Encenderla ya no puede negarse, y si alguien le vuelve a
+    // quitar la pieza, esto rompe.
+    let mut con_logprobs = BrainConfig::default();
+    con_logprobs.flags.logprobs = true;
+    assert!(
+        Brain::nuevo(Montaje {
+            config: con_logprobs,
             proveedores: vec![mock.clone()],
             registry: Registry::nuevo(modelos()),
             reglas: cfg.reglas.clone(),
             herramientas: cfg.herramientas.clone(),
             sonda: Arc::new(SondaFija::default()),
             ..Montaje::de_proveedor(mock.clone())
-        };
-        let s = match Brain::nuevo(montaje) {
-            Err(e) => e.mensaje(),
-            Ok(_) => panic!("un flag de una fase sin construir no puede montar un Brain"),
-        };
-        assert!(s.contains(campo), "{campo} no se nombró en el error: {s}");
-        assert!(s.contains(fase), "el error tiene que decir de qué fase es: {s}");
-        assert!(s.contains("no está construida"), "{s}");
-    }
+        })
+        .is_ok(),
+        "la Fase 6 está construida: encender `logprobs` tiene que montar"
+    );
 }
 
 /// §1 del Plan: una decisión cerrada solo se mueve con una entrada nueva en

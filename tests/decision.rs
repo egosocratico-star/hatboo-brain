@@ -332,6 +332,95 @@ async fn inspec_traita_las_senales_de_la_misma_forma_que_el_motor() {
     assert_eq!(mock.n_peticiones(), 0);
 }
 
+/// Lo que rompió esto: `temperature: 0.0` y `seed: 42` estaban quemados en el
+/// runtime, así que **todas** las conversaciones salían en decodificación voraz
+/// con semilla fija — medido en el producto: un modelo de 1B repetía la misma
+/// frase literal turno tras turno. El protocolo de la Fase 0 es del banco de
+/// medidas; lo que va al proveedor lo decide `BrainConfig`, y su defecto es no
+/// mandar la clave.
+#[tokio::test]
+async fn el_muestreo_lo_manda_la_config_nunca_el_runtime() {
+    for (temperatura, semilla) in [(None, None), (Some(0.3), Some(7u64))] {
+        let c = config();
+        let mock = std::sync::Arc::new(
+            hatboo_brain::providers::MockProvider::nuevo(c.registry.modelos.clone())
+                .con_nombre("ollama"),
+        );
+        mock.responde_texto("vale");
+        let montaje = hatboo_brain::brain::Montaje {
+            config: hatboo_brain::config::schema::BrainConfig {
+                temperatura,
+                semilla,
+                ..Default::default()
+            },
+            registry: c.registry.clone(),
+            reglas: c.reglas.clone(),
+            herramientas: c.herramientas.clone(),
+            proveedores: vec![mock.clone()],
+            sonda: std::sync::Arc::new(hatboo_brain::resources::SondaFija::default()),
+            ..hatboo_brain::brain::Montaje::de_proveedor(mock.clone())
+        };
+        let brain = hatboo_brain::brain::Brain::nuevo(montaje).unwrap();
+        brain
+            .run(&BrainRequest::nuevo("hatboo", "chat", "hola"))
+            .await
+            .unwrap();
+        let p = mock.ultima_peticion().expect("el turno llegó al proveedor");
+        assert_eq!(p.temperature, temperatura, "temperatura pedida: {temperatura:?}");
+        assert_eq!(p.seed, semilla, "semilla pedida: {semilla:?}");
+    }
+}
+
+/// Fase 6 de punta a punta: el flag se pide al proveedor, lo que el proveedor
+/// devuelve llega a las métricas, y con el flag apagado no se manda nada.
+#[tokio::test]
+async fn los_logprobs_se_piden_se_cosechan_y_no_mandan_nada() {
+    use hatboo_brain::config::schema::Flags;
+    use hatboo_brain::providers::GenerationResult;
+
+    for (encendido, logprob) in [(true, Some(-0.5f32)), (false, None)] {
+        let c = config();
+        let mock = std::sync::Arc::new(
+            hatboo_brain::providers::MockProvider::nuevo(c.registry.modelos.clone())
+                .con_nombre("ollama"),
+        );
+        mock.responde(GenerationResult {
+            texto: "vale".into(),
+            logprob_medio: if encendido { logprob } else { None },
+            ..Default::default()
+        });
+        let montaje = hatboo_brain::brain::Montaje {
+            config: hatboo_brain::config::schema::BrainConfig {
+                flags: Flags {
+                    logprobs: encendido,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            registry: c.registry.clone(),
+            reglas: c.reglas.clone(),
+            herramientas: c.herramientas.clone(),
+            proveedores: vec![mock.clone()],
+            sonda: std::sync::Arc::new(hatboo_brain::resources::SondaFija::default()),
+            ..hatboo_brain::brain::Montaje::de_proveedor(mock.clone())
+        };
+        let brain = hatboo_brain::brain::Brain::nuevo(montaje)
+            .unwrap_or_else(|e| panic!("con logprobs={encendido} el Brain debe arrancar: {e}"));
+        let r = brain
+            .run(&BrainRequest::nuevo("hatboo", "chat", "hola"))
+            .await
+            .unwrap();
+        let p = mock.ultima_peticion().expect("hubo llamada al modelo");
+        assert_eq!(p.logprobs, encendido, "el flag llega al proveedor tal cual");
+        assert_eq!(r.metrics.logprob_medio, if encendido { logprob } else { None });
+        assert_eq!(
+            r.metrics.probabilidad,
+            if encendido { Some((-0.5f32).exp()) } else { None },
+            "la probabilidad es exp de la media, ni más ni menos"
+        );
+    }
+}
+
 #[tokio::test]
 async fn un_saludo_no_devuelve_una_burbuja_vacia() {
     // Lo que cierra esto: el Fast Path del saludo marcaba `skip_generative` sin

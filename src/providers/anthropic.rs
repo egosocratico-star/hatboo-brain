@@ -67,8 +67,10 @@ impl AnthropicProvider {
             // presupuestó los dos: `tope_de_generacion` es esa suma.
             "max_tokens": req.tope_de_generacion(),
             "stream": true,
-            "temperature": req.temperature,
         });
+        if let Some(t) = req.temperature {
+            cuerpo["temperature"] = serde_json::json!(t);
+        }
         if !req.system.is_empty() {
             cuerpo["system"] = serde_json::Value::String(req.system.clone());
         }
@@ -83,8 +85,12 @@ impl AnthropicProvider {
             cuerpo["thinking"] = serde_json::json!({
                 "type": "enabled", "budget_tokens": presupuesto
             });
-            // Con pensamiento activado la API no admite temperature != 1.
-            cuerpo["temperature"] = serde_json::json!(1.0);
+            // Con pensamiento activado la API no admite temperature != 1. Si el
+            // producto no pidió temperatura no se manda ninguna: su defecto ya es
+            // 1,0, y meterla aquí sería administrar un valor que nadie pidió.
+            if req.temperature.is_some() {
+                cuerpo["temperature"] = serde_json::json!(1.0);
+            }
         }
         if !req.tools.is_empty() {
             cuerpo["tools"] = serde_json::json!(
@@ -140,6 +146,10 @@ impl AnthropicProvider {
             carga_ms: Some(0),
             // Anthropic avisa con `stop_reason`, no con un error.
             truncado: j.get("stop_reason").and_then(|v| v.as_str()) == Some("max_tokens"),
+            // La Messages API no expone log-probabilities, así que `logprobs`
+            // pedido aquí se queda en `None` y se dice: no es un modelo seguro de
+            // salida 0, es un proveedor que no lo cuenta.
+            logprob_medio: None,
         }
     }
 
@@ -391,8 +401,9 @@ mod tests {
             keep_alive: KeepAlive::PorDefecto,
             thinking: ThinkingLevel::Off,
             max_output_tokens: 512,
-            temperature: 0.0,
-            seed: 42,
+            temperature: Some(0.0),
+            seed: Some(42),
+            logprobs: false,
             timeout_s: 30,
             salida_json: false,
         }

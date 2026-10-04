@@ -167,16 +167,15 @@ impl Brain {
         if m.proveedores.is_empty() {
             return Err(BrainError::Config(crate::config::ConfigError::SinBackend));
         }
-        // Un flag sirve para apagar una pieza que existe (§II.10). `logprobs` y
-        // `backend_decision` son las Fases 6 y 7: aquí no hay nada que encender,
-        // y quedarse callado dejaría un config que se cree activo sin serlo.
-        let sin_pieza: Vec<&str> = [
-            m.config.flags.logprobs.then_some("logprobs (Fase 6)"),
-            m.config
-                .flags
-                .backend_decision
-                .then_some("backendDecision (Fase 7)"),
-        ]
+        // Un flag sirve para apagar una pieza que existe (§II.10). La Fase 6
+        // (`logprobs`) ya está construida: se pide, se cose y se reporta, y no
+        // cambia ninguna decisión. La 7 sigue sin pieza, y quedarse callado
+        // dejaría un config que se cree activo sin serlo.
+        let sin_pieza: Vec<&str> = [m
+            .config
+            .flags
+            .backend_decision
+            .then_some("backendDecision (Fase 7)")]
         .into_iter()
         .flatten()
         .collect();
@@ -934,8 +933,9 @@ impl Brain {
             keep_alive: plan.keep_alive,
             thinking: plan.thinking,
             max_output_tokens: plan.max_output_tokens,
-            temperature: 0.0,
-            seed: 42,
+            temperature: self.config.temperatura,
+            seed: self.config.semilla,
+            logprobs: self.config.flags.logprobs,
             timeout_s: plan.timeout_s,
             salida_json: plan.output_contract == crate::api::vocab::OutputContract::Json,
         };
@@ -1220,6 +1220,8 @@ impl Brain {
             // El crate no mide la RAM del proceso ajeno: la pone el producto en
             // su panel. Aquí se deja en None si no hay medida.
             ram_mb: None,
+            logprob_medio: c.g.logprob_medio,
+            probabilidad: crate::providers::exp_de_logprob(c.g.logprob_medio),
             recargas: c.recargas,
             reintentos: c.reintentos,
             contexto_rechazado: c.preparado.rechazado.len() as u32,

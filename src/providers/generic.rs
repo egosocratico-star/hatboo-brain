@@ -130,8 +130,9 @@ mod tests {
             keep_alive: KeepAlive::PorDefecto,
             thinking: ThinkingLevel::Off,
             max_output_tokens: 256,
-            temperature: 0.0,
-            seed: 42,
+            temperature: Some(0.0),
+            seed: Some(42),
+            logprobs: false,
             timeout_s: 30,
             salida_json: false,
         }

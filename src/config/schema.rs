@@ -98,6 +98,15 @@ pub struct BrainConfig {
     /// El techo de `thinking` que el producto ofrece por defecto. El Request puede
     /// bajarlo; nunca subirlo.
     pub thinking_ceiling: Option<crate::api::vocab::ThinkingLevel>,
+    /// `temperature` que se manda por la línea. `None` = no se manda la clave y
+    /// decide el proveedor, que es la conducta de un chat sin administrar.
+    /// `Some(0.0)` es el protocolo de la Fase 0: sólo lo quiere un banco de
+    /// medidas, no una conversación.
+    pub temperatura: Option<f32>,
+    /// `seed` en el mismo sentido que `temperatura`. Fijar la semilla sin fijar
+    /// la temperatura no hace determinista nada: cambia el punto de partida del
+    /// muestreo, no el muestreo.
+    pub semilla: Option<u64>,
 }
 
 impl Default for BrainConfig {
@@ -113,6 +122,8 @@ impl Default for BrainConfig {
             cache_max: 256,
             cache_ttl_s: 900,
             thinking_ceiling: None,
+            temperatura: None,
+            semilla: None,
         }
     }
 }
@@ -185,6 +196,19 @@ mod tests {
         assert!(c.flags.fast_path);
         assert!(!c.flags.logprobs, "las fases 6 y 7 nacen apagadas");
         assert_eq!(c.thinking_ceiling, None);
+        // El muestreo: no mandarlo es el default. Un producto que no dice nada
+        // deja decidir al proveedor.
+        assert_eq!(c.temperatura, None);
+        assert_eq!(c.semilla, None);
+    }
+
+    /// El banco de la Fase 0 y cualquier producto que quiera determinismo lo
+    /// escriben en el JSON de config; no es un valor quemado en el código.
+    #[test]
+    fn el_muestreo_se_pide_por_config() {
+        let c: BrainConfig = serde_json::from_str(r#"{"temperatura": 0.0, "semilla": 42}"#).unwrap();
+        assert_eq!(c.temperatura, Some(0.0));
+        assert_eq!(c.semilla, Some(42));
     }
 
     #[test]
