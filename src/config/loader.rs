@@ -132,6 +132,11 @@ mod tests {
     fn tmpdir(nombre: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
         p.push(format!("hatboo-brain-cfg-{}-{nombre}", std::process::id()));
+        // Se limpia antes de crear: la ruta va por PID, y en Windows los PIDs se
+        // reutilizan. Un `models.json` de una corrida anterior en el mismo nombre
+        // hacía que `models_desde_ejemplo` saliera `false` al azar — la prueba
+        // fallaba sola, sin que hubiera cambiado nada del código.
+        let _ = std::fs::remove_dir_all(&p);
         let _ = std::fs::create_dir_all(&p);
         p
     }
