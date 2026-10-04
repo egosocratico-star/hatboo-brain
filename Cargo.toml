@@ -10,9 +10,12 @@ readme = "README.md"
 keywords = ["llm", "agent", "routing", "ollama"]
 categories = ["api-bindings", "asynchronous"]
 
-# Las mismas siete dependencias que ya compila Hatboo desktop. Sin `sha2`: los
-# hashes del crate (plan_hash, trust) son identificadores de linaje, no firmas,
-# y se calculan con FNV-1a-64 escrito aquí (`observability::hash`).
+# Las mismas siete dependencias que ya compila Hatboo desktop, más `sha2`: el
+# hash de confianza de `HATBOO.md` **sí** se usa para decidir si un contenido
+# entra al prompt, así que ya no puede ser FNV (§8 del plan). El resto de hashes
+# del crate (`plan_hash`, `parent_plan_hash`, la firma de la caché) siguen siendo
+# identificadores de linaje y se calculan con el FNV-1a-64 de
+# `observability::hash`.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,10 +24,14 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 async-trait = "0.1"
 futures-util = "0.3"
 thiserror = "2"
+sha2 = "0.10"
 
 [features]
-default = ["ollama", "openai", "anthropic", "generic"]
-# Ollama es el primer backend y el único que el Canon exige en la Fase 1.
+# Solo Ollama por defecto: es el backend que el Canon exige en la Fase 1 y el
+# único que corre en la máquina de referencia. Las tres puertas de API se encienden
+# explícitamente (`--features openai`), así que un consumidor local no arrastra
+# código de red que no va a usar ni paga su superficie en el binario.
+default = ["ollama"]
 ollama = []
 openai = []
 anthropic = []

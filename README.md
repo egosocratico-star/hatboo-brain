@@ -55,8 +55,9 @@ redacción. Un `HATBOO.md` sin hash aprobado no entra, y un `<datos>` sale escap
 ## Proveedores
 
 `ollama`, `openai`, `anthropic` y `generic` (cualquier puerta compatible con
-OpenAI) están implementados; los tres de API van detrás de features de Cargo y son
-opcionales en tiempo de compilación. Las claves las pone el producto y nunca se
+OpenAI) están implementados. **El `default` del crate es solo `ollama`**: las
+tres de API se encienden por feature, así que un consumidor local no arrastra
+código de red que no va a usar. Las claves las pone el producto y nunca se
 guardan en el crate: los errores se redactan antes de salir, porque un 401 suele
 reenviar la clave en el cuerpo.
 

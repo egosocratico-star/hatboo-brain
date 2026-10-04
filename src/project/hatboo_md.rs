@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Archivo {
-    /// Hash del contenido actual. Identificador de linaje, no firma.
+    /// Hash SHA-256 del contenido actual. Aquí sí es una comprobación contra
+    /// alguien que puede escribir el archivo: con FNV un atacante podía calcular
+    /// el hash de otro contenido y pasar por aprobado.
     pub current_hash: String,
     /// Hash que el usuario aprobó, si alguna vez lo aprobó.
     pub approved_hash: Option<String>,
@@ -22,7 +24,7 @@ pub struct Archivo {
 impl Archivo {
     /// Estado a partir del contenido que trajo el producto y del almacén.
     pub fn desde_contenido(contenido: &str, almacen: &AlmacenDeConfianza, clave: &str) -> Archivo {
-        let current_hash = crate::observability::hash::fnv1a64(contenido);
+        let current_hash = crate::observability::hash::sha256(contenido);
         let aprobado = almacen.aprobado(clave);
         let trust_state = if almacen.esta_rechazado(clave) {
             TrustState::Rechazado

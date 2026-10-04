@@ -2,7 +2,6 @@
 //! cambiado, inyección de prompt y un secreto que no sale hacia la API ni al log.
 //! Aquí es donde se ve que el prompt no manda: las cuatro defensas están en código.
 
-use hatboo_brain::api::error::BrainError;
 use hatboo_brain::api::request::BrainRequest;
 use hatboo_brain::api::vocab::{
     ApprovalLevel, ExecutionPolicy, ExecutionTarget, Intent, Level, OutputContract, Risk,
@@ -13,7 +12,7 @@ use hatboo_brain::observability::logger::{Bitacora, BitacoraConfig};
 use hatboo_brain::planner::Plan;
 use hatboo_brain::project::hatboo_md::Archivo;
 use hatboo_brain::project::trust::AlmacenDeConfianza;
-use hatboo_brain::providers::{GenerationRequest, ProviderError};
+use hatboo_brain::providers::ProviderError;
 use hatboo_brain::security::redact;
 use hatboo_brain::tools::{Deciso, Herramientas, Puerta};
 use hatboo_brain::verification::patch::dentro_de;
@@ -267,8 +266,14 @@ fn una_escritura_sin_permiso_no_llega_a_ejecutarse_ni_con_el_plan_a_favor() {
     let _ = p;
 }
 
+/// Toca `OpenAiProvider`, que ya no viene en el `default` del crate: sin la
+/// feature `openai` no hay nada que comprobar aquí.
+#[cfg(feature = "openai")]
 #[test]
 fn sin_credencial_el_error_no_suelta_ninguna_clave() {
+    use hatboo_brain::api::error::BrainError;
+    use hatboo_brain::providers::GenerationRequest;
+
     let e = BrainError::Provider(ProviderError::SinCredencial("openai".into()));
     assert!(e.mensaje().contains("openai"), "{}", e.mensaje());
     assert!(!e.mensaje().to_lowercase().contains("sk-"), "{}", e.mensaje());
@@ -292,4 +297,50 @@ fn sin_credencial_el_error_no_suelta_ninguna_clave() {
     let c = hatboo_brain::providers::OpenAiProvider::cuerpo_de(&g, "openai");
     let j = c.to_string();
     assert!(!j.contains("Bearer") && !j.contains("api_key"), "{j}");
+}
+
+/// §12 del plan pide un `local_only` **sin red**, y eso no es una preferencia:
+/// aquí el modelo de nube gana por todo —tier 9 contra 1, mas fortalezas, tools
+/// declaradas— y aun así no se le llama. Si alguien abre la policy en el
+/// selector o deja que el `escalate_to` salga del equipo, esta prueba es la que
+/// lo pilla.
+#[tokio::test]
+async fn local_only_no_toca_la_red_aunque_la_nube_gane_por_calidad() {
+    use std::sync::Arc;
+    let local: hatboo_brain::models::ModelInfo = serde_json::from_str(
+        r#"{"id":"gemma3:1b","provider":"ollama","local":true,"kind":"generative","profile":"nano","tier":1,"ram_mb_by_ctx":{"2048":878,"4096":881,"8192":958},"max_ctx":32768}"#,
+    )
+    .unwrap();
+    let nube: hatboo_brain::models::ModelInfo = serde_json::from_str(
+        r#"{"id":"claude-opus","provider":"openai","local":false,"kind":"generative","profile":"small","tier":9,"max_ctx":200000,"strengths":["codigo","chat"],"supports_tools":true}"#,
+    )
+    .unwrap();
+    let ollama = Arc::new(hatboo_brain::providers::MockProvider::nuevo(vec![]).con_nombre("ollama"));
+    let api = Arc::new(hatboo_brain::providers::MockProvider::nuevo(vec![]).con_nombre("openai"));
+    ollama.responde_texto("saludo local");
+    api.responde_texto("esto no se tendría que haber ejecutado");
+
+    let cfg = hatboo_brain::config::loader::Cargada::leer(Some(&std::path::Path::new(
+        env!("CARGO_MANIFEST_DIR"),
+    )
+    .join("config")))
+    .unwrap();
+    let montaje = hatboo_brain::brain::Montaje {
+        registry: hatboo_brain::models::Registry::nuevo(vec![local, nube]),
+        reglas: cfg.reglas.clone(),
+        herramientas: cfg.herramientas.clone(),
+        proveedores: vec![ollama.clone(), api.clone()],
+        sonda: Arc::new(hatboo_brain::resources::SondaFija::default()),
+        ..hatboo_brain::brain::Montaje::de_proveedor(ollama.clone())
+    };
+    let brain = hatboo_brain::brain::Brain::nuevo(montaje).unwrap();
+    let r = brain
+        .run(&BrainRequest::nuevo("hatboo", "chat", "hola").con_policy(ExecutionPolicy::LocalOnly))
+        .await
+        .unwrap();
+
+    assert_eq!(r.plan.execution_target, ExecutionTarget::Local, "{:?}", r.plan.execution_target);
+    assert_eq!(r.plan.provider, "ollama", "el Plan miraba a la API: {}", r.plan.model);
+    assert_eq!(ollama.n_peticiones(), 1, "el turno local tenía que contestarse");
+    assert_eq!(api.n_peticiones(), 0, "local_only llamó a un proveedor de API");
 }

@@ -248,6 +248,11 @@ use super::models::{ModelInfo, ModeloCargado};
 /// Lee un `text/event-stream` entero y devuelve los JSON de sus `data:`. Se hace
 /// todo en memoria porque el `BrainResult` necesita el total para verificar: el
 /// stream de red y el stream que ve el usuario son dos cosas distintas.
+///
+/// Solo lo consumen las puertas de API (Ollama lee ndjson con el suyo), así que
+/// va detrás de esas features: con el `default = ["ollama"]` sin más sería código
+/// muerto y `-D warnings` lo cortaría.
+#[cfg(any(feature = "openai", feature = "anthropic", feature = "generic"))]
 pub(crate) async fn sse_hasta_final(
     resp: reqwest::Response,
 ) -> Result<Vec<serde_json::Value>, ProviderError> {
@@ -285,6 +290,7 @@ pub(crate) async fn sse_hasta_final(
 
 /// Junta los trozos de un stream SSE de chat en un solo objeto con la forma de una
 /// respuesta no-stream, para reutilizar el decodificador.
+#[cfg(any(feature = "openai", feature = "anthropic", feature = "generic"))]
 pub(crate) fn json_de_sse(eventos: &[serde_json::Value]) -> serde_json::Value {
     let mut texto = String::new();
     let mut razon = String::new();

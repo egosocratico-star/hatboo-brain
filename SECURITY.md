@@ -39,8 +39,10 @@ lo que no pasa por el código, no pasa.
   espera de un proceso y el aislamiento son del producto.
 - No guarda secretos ni estado entre conversaciones.
 - No decide permisos: propone y rinde cuentas (`plan_hash`, `reason`, eventos).
-- `HATBOO.md` sin hash aprobado no entra al contexto. El hash de confianza es
-  **FNV-1a de 64 bits**: identifica linaje, **no firma**. Ver el threat model,
+- `HATBOO.md` sin hash aprobado no entra al contexto. Ese hash es **SHA-256**
+  desde el 04-10, y a propósito: decide si un contenido llega al prompt. Los
+  hashes de linaje (`plan_hash`, `parent_plan_hash`, la firma de la caché) siguen
+  en FNV-1a-64, que identifica pero no firma. Ver `docs/threat-model.md`,
   amenaza T10.
 
 ## Denegación de servicio y bucles
