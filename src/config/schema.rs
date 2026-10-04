@@ -41,10 +41,14 @@ pub struct Flags {
     pub escalar: bool,
     /// Verificación determinista corriendo comandos del proyecto.
     pub verificacion_ejecucion: bool,
-    /// Logprobs (Fase 6). Off hasta calibrar — y no se puede encender: `Brain::nuevo`
-    /// lo rechaza mientras la pieza no esté construida.
+    /// Logprobs (Fase 6, construida el 04-10). Apagada por defecto: se pide al
+    /// proveedor, se cose y se reporta en `TaskMetrics`, pero **no decide nada** —
+    /// §1 deja el origen estadístico en solo registro hasta que exista la
+    /// calibración medida (§15.4).
     pub logprobs: bool,
-    /// Backend de decisión tipo Laya (Fase 7). Igual que el anterior: sin pieza.
+    /// Backend de decisión tipo Laya (Fase 7). Sigue **sin pieza**: `Brain::nuevo`
+    /// lo rechaza nombrando el campo, y no se construye sin el checkpoint del
+    /// plan (§11.1) y sin el criterio de calibración con números.
     pub backend_decision: bool,
     /// §15.9: guardar el texto del usuario (redactado) como dataset de
     /// decisiones. **Apagado por defecto** y sigue estándolo aunque exista la

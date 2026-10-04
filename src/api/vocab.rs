@@ -263,7 +263,11 @@ pub enum DecisionSource {
     FastPath,
     Reglas,
     Cache,
-    /// Fase 6: logprobs del modelo ya cargado.
+    /// Fase 6: logprobs del modelo ya cargado. **Nada lo produce todavía**: la
+    /// Fase 6 cosecha y reporta los log-probabilities, pero §1 no deja que un
+    /// origen estadístico decida hasta que haya calibración medida. Existe para
+    /// que el consumidor pueda pintar «decidido por el modelo» cuando eso pase,
+    /// no para fingirlo hoy.
     Logprobs,
     /// Fase 7: backend de decisión (Laya u otro).
     Backend,
