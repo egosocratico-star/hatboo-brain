@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 /models.json
 /models.sondeado.json
 /brain.log
