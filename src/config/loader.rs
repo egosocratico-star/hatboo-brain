@@ -21,6 +21,13 @@ pub struct Cargada {
     /// Governor puede trabajar con eso, pero el producto tiene que decir que las
     /// cifras no son de **esta** máquina: es un ejemplo, no una medición.
     pub models_desde_ejemplo: bool,
+    /// `true` si no había `brain-rules.json` (o no había ni directorio) y se
+    /// usaron las reglas que viajan **dentro del crate**. Un producto empaquetado
+    /// no tiene carpeta de config: sin esta caída se quedaba con un cerebro que
+    /// no candidateaba nada y firmaba un Plan de suelo sin decirlo.
+    pub reglas_embebidas: bool,
+    /// Lo mismo para el catálogo de tools (`Herramientas::empotradas`).
+    pub herramientas_embebidas: bool,
 }
 
 impl Cargada {
@@ -33,6 +40,18 @@ impl Cargada {
         };
         let Some(dir) = dir else {
             c.ausentes.push("dir_config".into());
+            // Sin directorio no hay de dónde leer: se usan las del crate y se
+            // declara, que es justo lo que Hatboo hacía a mano por su cuenta.
+            c.reglas = Reglas::empotradas().map_err(|e| ConfigError::Json {
+                archivo: "reglas embebidas".into(),
+                causa: e.to_string(),
+            })?;
+            c.herramientas = Herramientas::empotradas().map_err(|e| ConfigError::Json {
+                archivo: "tools embebidas".into(),
+                causa: e.to_string(),
+            })?;
+            c.reglas_embebidas = true;
+            c.herramientas_embebidas = true;
             return Ok(c);
         };
         c.reglas = Reglas::desde_json(&texto(&dir.join("brain-rules.json"), &mut c)?)
@@ -40,6 +59,17 @@ impl Cargada {
                 archivo: "brain-rules.json".into(),
                 causa: e.to_string(),
             })?;
+        // Un `brain-rules.json` que no estaba, o que estaba y venía vacío, no
+        // puede dejar el cerebro sin reglas: se cae a las que viajan dentro del
+        // crate y se declara (`reglas_embebidas`). Va **antes** de `tuning.json`,
+        // porque los pesos se aplican encima de las reglas que queden.
+        if c.reglas.reglas.is_empty() {
+            c.reglas = Reglas::empotradas().map_err(|e| ConfigError::Json {
+                archivo: "reglas embebidas".into(),
+                causa: e.to_string(),
+            })?;
+            c.reglas_embebidas = true;
+        }
         // §3: los pesos de la decisión ponderada por costo vienen aparte
         // (`tuning.json`). Sin archivo no hay pesos: `Tuning::neutral()` deja la
         // elección como estaba, y `c.reglas.tuning.es_neutral()` es lo que el
@@ -59,6 +89,14 @@ impl Cargada {
                 archivo: "tools.json".into(),
                 causa: e.to_string(),
             })?;
+        // Igual que con las reglas: catálogo vacío = el del crate, dicho.
+        if c.herramientas.disponibles().is_empty() {
+            c.herramientas = Herramientas::empotradas().map_err(|e| ConfigError::Json {
+                archivo: "tools embebidas".into(),
+                causa: e.to_string(),
+            })?;
+            c.herramientas_embebidas = true;
+        }
         let modelos = texto(&dir.join("models.json"), &mut c)?;
         let mut reg: Registry =
             Registry::desde_json(&modelos).map_err(|e| ConfigError::Json {
@@ -141,11 +179,31 @@ mod tests {
         p
     }
 
+    /// Un producto empaquetado no tiene directorio de config. Antes eso daba un
+    /// `Cargada` con reglas y tools **vacías** en silencio — el cerebro firmaba un
+    /// Plan de suelo sin decirlo—; ahora cae a lo embebido y lo declara.
     #[test]
-    fn sin_directorio_no_hay_nada_y_no_falla() {
+    fn sin_directorio_entran_las_embebidas_y_se_dice() {
         let c = Cargada::leer(None).unwrap();
-        assert!(c.reglas.reglas.is_empty());
+        assert!(!c.reglas.reglas.is_empty(), "sin config no puede quedar sin reglas");
+        assert!(!c.herramientas.disponibles().is_empty());
+        assert!(c.reglas_embebidas && c.herramientas_embebidas, "y tiene que poder decirse");
+        assert!(c.reglas.tuning.es_neutral(), "los pesos no vienen embebidos");
         assert_eq!(c.ausentes, vec!["dir_config".to_string()]);
+        assert!(c.registry.modelos.is_empty(), "el registry sí es del producto");
+    }
+
+    /// Con directorio pero sin los dos archivos, la misma caída. Y si el
+    /// `brain-rules.json` existe y está vacío, cuenta igual como vacío.
+    #[test]
+    fn archivo_vacio_cae_a_lo_embebido() {
+        let d = tmpdir("vacio-pero-con-ficheros");
+        std::fs::write(d.join("brain-rules.json"), r#"{"version":1,"reglas":[]}"#).unwrap();
+        std::fs::write(d.join("tools.json"), r#"{"version":1,"tools":[]}"#).unwrap();
+        let c = Cargada::leer(Some(&d)).unwrap();
+        assert!(c.reglas_embebidas, "un JSON de reglas vacío no es un cerebro");
+        assert!(c.herramientas_embebidas);
+        assert!(c.leidos.iter().any(|p| p.ends_with("brain-rules.json")));
     }
 
     #[test]
