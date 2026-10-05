@@ -910,8 +910,26 @@ async fn corre_suite(
                     salida.push(c);
                 }
                 Err(err) => {
+                    // Una entrada que no pudo correrse **no** borra las demás.
+                    // Antes devolvía `Err` y se tiraba el paso entero del modelo:
+                    // medido el 04-10, `codigo-01` con `--modelo gemma3:1b` (un
+                    // modelo que no declara tools) dejó el volcado en **cero
+                    // corridas**, o sea la comparación de §9 imposible por un
+                    // solo caso. Se registra como falla y se sigue.
                     eprintln!("  rep {rep:>2} · ERROR en {}: {err}", e.id);
-                    return Err(format!("{}: {err}", e.id));
+                    salida.push(Corrida {
+                        entrada: e.id.clone(),
+                        categoria: e.categoria.clone(),
+                        split: e.split.clone(),
+                        modelo: modelo.to_string(),
+                        modo: opts.modo.clone(),
+                        rep,
+                        nivel_esperado: e.nivel_esperado.map(|l| format!("{l:?}")),
+                        resultado: "falla".into(),
+                        motivo: format!("no se pudo correr: {err}"),
+                        estado_salida: "Rechazado".into(),
+                        ..Default::default()
+                    });
                 }
             }
             let _ = std::fs::remove_dir_all(&raiz);
