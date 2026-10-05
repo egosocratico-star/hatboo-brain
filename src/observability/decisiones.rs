@@ -29,6 +29,14 @@ pub struct RegistroDecision {
     /// Si el turno acabó verificado, propuesto, sin verificar o rechazado.
     pub resultado: String,
     pub motivo_plan: String,
+    /// **Hash**, no texto: lo que se quiere poder responder es «¿esta decisión la
+    /// cambió una skill o una nota de memoria?», y para eso basta con saber si el
+    /// bloque del producto era el mismo o distinto. El contenido lo escribe el
+    /// usuario, y el dataset no se convierte en un espejo de sus notas.
+    ///
+    /// Vacío cuando el producto no mandó bloque: un consumidor viejo sigue teniendo
+    /// la misma línea de siempre.
+    pub contexto_producto_hash: String,
 }
 
 impl RegistroDecision {
@@ -83,6 +91,7 @@ mod tests {
             local: true,
             resultado: "verificado".into(),
             motivo_plan: "charla corta".into(),
+            contexto_producto_hash: String::new(),
         }
     }
 
@@ -97,5 +106,27 @@ mod tests {
         let j: serde_json::Value = serde_json::from_str(&guardado).expect("JSON por línea");
         assert_eq!(j["nivel"], "N1");
         assert_eq!(j["mensaje"], "hola");
+    }
+
+    /// Lo que se guarda del bloque del producto es su **hash**. El dataset tiene
+    /// que poder responder «¿esto lo decidió así con esta skill puesta?» sin
+    /// convertirse en una copia de las notas que el usuario escribe para sí mismo.
+    #[test]
+    fn del_bloque_del_producto_se_guarda_el_hash_no_el_texto() {
+        use crate::observability::hash::sha256;
+        let mut r = registro();
+        r.contexto_producto_hash = sha256("prefiero respuestas cortas");
+        let linea = r.to_linea();
+        let j: serde_json::Value = serde_json::from_str(&linea).unwrap();
+        let guardado = j["contexto_producto_hash"].as_str().expect("un hash");
+        assert_eq!(guardado.len(), 64, "sha-256 en hex: {guardado}");
+        assert!(!linea.contains("respuestas cortas"), "el texto no viaja: {linea}");
+        // Mismo bloque, misma firma; otro bloque, otra firma. Es lo que permite
+        // emparejar una decisión con el contexto que la produjo.
+        assert_eq!(sha256("prefiero respuestas cortas"), guardado);
+        assert_ne!(sha256("prefiero respuestas largas"), guardado);
+        // Vacío = el producto no mandó bloque, y la línea lo dice con una cadena
+        // vacía en vez de con un hash de la nada.
+        assert_eq!(registro().contexto_producto_hash, "");
     }
 }

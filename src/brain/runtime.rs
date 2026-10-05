@@ -870,7 +870,16 @@ impl Brain {
         } else {
             "Responde en español."
         };
-        prompt::build_system(&self.identidad, &req.mode, tools, md, None, idioma)
+        let producto = req.texto_contexto_producto();
+        prompt::build_system(
+            &self.identidad,
+            &req.mode,
+            tools,
+            md,
+            producto.as_deref(),
+            None,
+            idioma,
+        )
     }
 
     fn preparar(
@@ -1377,6 +1386,13 @@ impl Brain {
                     local: plan.execution_target == crate::api::vocab::ExecutionTarget::Local,
                     resultado: format!("{:?}", r.output.status),
                     motivo_plan: plan.reason.clone(),
+                    // El bloque del producto va como hash: bastante para ver si la
+                    // decisión la cambió una skill, sin copiar en el dataset las
+                    // notas que el usuario escribió para él.
+                    contexto_producto_hash: req
+                        .texto_contexto_producto()
+                        .map(|t| crate::observability::hash::sha256(&t))
+                        .unwrap_or_default(),
                 });
             }
         }

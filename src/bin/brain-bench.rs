@@ -1133,6 +1133,7 @@ async fn llama_directo(
         &config.herramientas.ids(),
         None,
         None,
+        None,
         if e.lang == "en" { "en" } else { "es" },
     );
     let g = GenerationRequest {

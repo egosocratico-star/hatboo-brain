@@ -71,8 +71,8 @@ mod tests {
     #[test]
     fn el_mismo_plan_da_el_mismo_system() {
         let p = plan();
-        let s1 = build_system(&Identidad::default(), "work", &p.tools, None, None, "Responde en español.");
-        let s2 = build_system(&Identidad::default(), "work", &p.tools, None, None, "Responde en español.");
+        let s1 = build_system(&Identidad::default(), "work", &p.tools, None, None, None, "Responde en español.");
+        let s2 = build_system(&Identidad::default(), "work", &p.tools, None, None, None, "Responde en español.");
         let a = armar(vec![Pieza::nueva(Prioridad::Objetivo, "o", "arreglar x")], 100, &Estimador);
         let c1 = a.a_contexto(s1.clone());
         let c2 = a.a_contexto(s2.clone());

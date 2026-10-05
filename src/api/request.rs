@@ -143,6 +143,22 @@ pub struct BrainRequest {
     /// Solo esta sesión.
     #[serde(default)]
     pub history: Vec<Message>,
+    /// Lo que el producto añade a cada turno y **no es conversación**: las
+    /// plantillas activas, las notas de memoria del usuario y cualquier otro texto
+    /// de identidad o contexto que el producto quiera dentro del prompt.
+    ///
+    /// Viaja aquí, y no cabalgando en un mensaje `system` de `history`, por dos
+    /// motivos que se vieron en el producto. El primero: el armador presupuesta el
+    /// historial como un sufijo que se corta de atrás hacia adelante, así que lo
+    /// primero que se caía cuando apretaba la ventana era justamente la identidad,
+    /// las skills y la memoria. El segundo: `providers/anthropic.rs` filtra los
+    /// `system` del historial, y por esa puerta el bloque desaparecía sin decirlo.
+    ///
+    /// Este campo entra en el system prompt por su propia capa (`producto`) y, por
+    /// tanto, en `Presupuesto.fijo`: **no se recorta nunca**. Si con todo dentro no
+    /// cabe, el Plan lo dice en `reason` en vez de cortar una skill a medias.
+    #[serde(default)]
+    pub contexto_producto: Vec<Message>,
     #[serde(default)]
     pub tools: ToolSet,
     #[serde(default)]
@@ -174,6 +190,7 @@ impl BrainRequest {
             preferred_model: None,
             project: None,
             history: Vec::new(),
+            contexto_producto: Vec::new(),
             tools: ToolSet::default(),
             policies: ExecutionPolicy::default(),
             approval_level: ApprovalLevel::AskAlways,
@@ -203,9 +220,37 @@ impl BrainRequest {
         self
     }
 
+    /// Ver el campo: texto del producto que entra en el system prompt y **no** en
+    /// el historial.
+    pub fn con_contexto_producto(mut self, m: Vec<Message>) -> Self {
+        self.contexto_producto = m;
+        self
+    }
+
     pub fn con_policy(mut self, p: ExecutionPolicy) -> Self {
         self.policies = p;
         self
+    }
+
+    /// El bloque del producto como texto para la capa `producto` del system. `None`
+    /// si está vacío, que es el caso de siempre: un pedido sin contexto de producto
+    /// produce exactamente los mismos bytes que antes de este campo.
+    ///
+    /// Se unen los contenidos sin roles: aquí el rol no informa — lo que manda es
+    /// que todo esto es material del producto, no turnos de una conversación — y
+    /// el escape de la capa se aplica sobre el bloque entero.
+    pub fn texto_contexto_producto(&self) -> Option<String> {
+        let unido: Vec<String> = self
+            .contexto_producto
+            .iter()
+            .map(|m| m.content.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if unido.is_empty() {
+            None
+        } else {
+            Some(unido.join("\n\n"))
+        }
     }
 
     /// Lo que el Brain sabe del proyecto sin Option<> gymnastics.
@@ -327,5 +372,31 @@ mod tests {
         // El nombre del campo que ve el producto es camelCase, como en Hatboo.
         assert!(s.contains("\"preferredModel\""));
         assert!(s.contains("\"auto_sandbox\""));
+    }
+
+    /// El consumidor viejo no se entera: un JSON sin el campo nuevo sigue
+    /// parseando, y con el campo vacío `texto_contexto_producto` es `None`, que es
+    /// exactamente lo que hace que el system salga byte a byte como antes.
+    #[test]
+    fn un_pedido_sin_el_campo_nuevo_sigue_parseando_y_no_mueve_el_system() {
+        let sin_campo = r#"{"product":"hatboo","mode":"chat","message":"hola"}"#;
+        let v: BrainRequest = serde_json::from_str(sin_campo).expect("un JSON viejo parsea");
+        assert!(v.contexto_producto.is_empty());
+        assert_eq!(v.texto_contexto_producto(), None);
+
+        let r = BrainRequest::nuevo("hatboo", Mode::CHAT, "hola").con_contexto_producto(vec![
+            Message::usuario("  "),
+            Message::usuario("prefiero respuestas cortas"),
+        ]);
+        assert_eq!(
+            r.texto_contexto_producto().as_deref(),
+            Some("prefiero respuestas cortas"),
+            "los mensajes en blanco no aportan nada y no deben abrir la capa"
+        );
+
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"contextoProducto\""), "{s}");
+        let v: BrainRequest = serde_json::from_str(&s).unwrap();
+        assert_eq!(v, r);
     }
 }

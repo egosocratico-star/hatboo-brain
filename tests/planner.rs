@@ -391,6 +391,73 @@ async fn lo_que_el_plan_admitio_es_lo_que_llega_al_proveedor() {
     );
 }
 
+/// A.2.4: el contexto del producto **no es historial**. Mientras viajaba como
+/// mensaje `system` en la cabecera de `req.history`, lo primero que se caía cuando
+/// aprieta la ventana era justo la identidad, las skills y la memoria del usuario —
+/// el armador presupuesta el historial como sufijo que entra de atrás hacia
+/// adelante. Con el campo propio, el bloque va en la capa `producto` del system,
+/// y `fijo` no se toca nunca.
+#[tokio::test]
+async fn con_la_ventana_apretada_se_corta_el_historial_no_el_contexto_del_producto() {
+    let modelos = vec![modelo("gemma3:1b", false)];
+    let mock = std::sync::Arc::new(
+        hatboo_brain::providers::MockProvider::nuevo(modelos.clone()).con_nombre("ollama"),
+    );
+    for _ in 0..3 {
+        mock.responde_texto("vale");
+    }
+    let brain = hatboo_brain::brain::Brain::nuevo(hatboo_brain::brain::Montaje {
+        proveedores: vec![mock.clone()],
+        registry: Registry::nuevo(modelos.clone()),
+        sonda: std::sync::Arc::new(hatboo_brain::resources::SondaFija::default()),
+        ..hatboo_brain::brain::Montaje::de_proveedor(mock.clone())
+    })
+    .unwrap();
+
+    let mut req = BrainRequest::nuevo("hatboo", "chat", "¿y ahora qué?");
+    req.contexto_producto = vec![hatboo_brain::api::request::Message {
+        role: "system".into(),
+        content: "PREFIERE-RESPUESTAS-CORTAS: el usuario pidió frases cortas".into(),
+        reasoning: None,
+    }];
+    req.history = (0..12)
+        .map(|i| {
+            hatboo_brain::api::request::Message::usuario(format!("turno {i}: {}", "k".repeat(1200)))
+        })
+        .collect();
+
+    let plan = brain.plan(&req).await.unwrap();
+    assert!(
+        usize::from(plan.historial_turnos) < req.history.len(),
+        "la ventana tiene que estar apretando de verdad: {:?}",
+        plan.historial_turnos
+    );
+    assert!(
+        plan.reason.contains("historial recortado"),
+        "y lo dice: {}",
+        plan.reason
+    );
+
+    brain.run(&req).await.ok();
+    let peticion = mock.ultima_peticion().expect("hubo una petición");
+    assert!(
+        peticion.system.contains("PREFIERE-RESPUESTAS-CORTAS"),
+        "el bloque llega al proveedor dentro del system: {}",
+        peticion.system
+    );
+    assert!(
+        !peticion.history.iter().any(|m| m.content.contains("PREFIERE-RESPUESTAS-CORTAS")),
+        "y no viaja disfrazado de historial, que es donde lo filtraba Anthropic"
+    );
+    // El presupuesto lo cuenta una sola vez: `system_tokens` es el system completo,
+    // capa del producto incluida.
+    assert!(
+        plan.system_tokens > 40,
+        "el bloque está en la cuenta del system, no sumado aparte: {}",
+        plan.system_tokens
+    );
+}
+
 /// Y el caso contrario: un turno que no cabe NI en el plan pedido NI en el seguro.
 /// Antes `degradado` salía `false` justo ahí (estaba al revés), el runtime no
 /// anotaba ningún motivo y se firmaba una ventana desbordada. Ahora se dice.
