@@ -235,7 +235,9 @@ impl Brain {
     pub async fn plan(&self, req: &BrainRequest) -> Result<Plan, BrainError> {
         req.validar()?;
         let decision = self.decidir(req);
-        let (pie, _) = self.planificar(req, &decision).await?;
+        let (pie, _) = self
+            .planificar(req, &decision, self.config.respetar_modelo)
+            .await?;
         Ok(pie.plan)
     }
 
@@ -247,7 +249,9 @@ impl Brain {
         let decision = self.decidir(req);
         let fast_path = (decision.source == crate::api::vocab::DecisionSource::FastPath)
             .then(|| decision.por_que.clone());
-        let (pie, porque) = self.planificar(req, &decision).await?;
+        let (pie, porque) = self
+            .planificar(req, &decision, self.config.respetar_modelo)
+            .await?;
         // Lo que el motor de contexto dejó fuera se prepara de verdad para poder
         // decirlo. Estar `contexto_rechazado` fijo en `[]` era una traza que
         // afirmaba que no sobró nada sin haberlo comprobado.
@@ -378,7 +382,13 @@ impl Brain {
                 }));
             }
 
-            let (mut pie, porque_modelo) = self.planificar(req, &decision).await?;
+            // `respetarModelo` vale para el **primer** intento de la corrida: es lo
+            // que pidió el usuario y no se le sustituye. Si ya hubo un fallo real y
+            // el escalador pidió un plan nuevo, esa vuelta sigue firmando otro modelo
+            // si hace falta — es la recuperación medida de §7, y romperla aquí
+            // dejaría sin escalada todo lo que se cae a mitad de turno.
+            let respetar = self.config.respetar_modelo && rondas == 1;
+            let (mut pie, porque_modelo) = self.planificar(req, &decision, respetar).await?;
             // Linaje (§VIII): todo plan que no es el primero de la corrida lleva el
             // hash del que dejó de correr. `parent_plan_hash` está fuera del hash,
             // así que anotarlo aquí no rompe el que ya firmó el Armador.
@@ -756,10 +766,15 @@ impl Brain {
     }
 
     /// Governor + Selector + Armador. Devuelve el plan firmado y el por qué.
+    ///
+    /// `respetar_modelo` entra como argumento y no se lee del config porque no es
+    /// lo mismo el primer intento de una corrida que el plan al que vuelve el
+    /// escalador después de un fallo real: ver `correr`.
     async fn planificar(
         &self,
         req: &BrainRequest,
         decision: &DecisionResult,
+        respetar_modelo: bool,
     ) -> Result<(crate::planner::Pie, String), BrainError> {
         let mut registry = self.registry.clone();
         if registry.modelos.is_empty() {
@@ -769,8 +784,14 @@ impl Brain {
             }
             registry = Registry::nuevo(v);
         }
-        let eleccion =
-            selector::elegir(req, decision, &registry, &self.governor, self.sonda.as_ref())?;
+        let eleccion = selector::elegir(
+            req,
+            decision,
+            &registry,
+            &self.governor,
+            self.sonda.as_ref(),
+            respetar_modelo,
+        )?;
         self.proveedor(&eleccion.modelo.provider).ok_or_else(|| {
             BrainError::InvalidPlan(crate::planner::PlanViolation::ProviderNotAllowed(
                 eleccion.modelo.provider.clone(),

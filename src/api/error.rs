@@ -26,6 +26,23 @@ pub enum BrainError {
     /// margen que hay que dejar libre, no solo lo que pesa el modelo.
     #[error("no hay sitio: hacen falta {needed_mb} MB libres (modelo + margen) y quedan {free_mb}")]
     ResourceExhausted { needed_mb: u32, free_mb: u32 },
+    /// `respetarModelo` encendido y el modelo que eligió el producto no puede
+    /// correr: **no se le sustituye por otro**. `motivo` es la frase del Governor
+    /// (`no cabe: «x» necesita 1063 MB a 2048 y quedan 1302 libres (margen 1056)`)
+    /// o, si el modelo cabe pero no cumple lo que pide el Plan, el motivo concreto
+    /// de eso; siempre nombra al modelo pedido, que es lo que el usuario tiene que
+    /// poder corregir en Ajustes. Los números van también sueltos para que el
+    /// producto no tenga que leer una frase para pintar una tabla. Mismo criterio de
+    /// `needed_mb` que en `ResourceExhausted`: RAM del modelo + el margen con el que
+    /// se comprobó, no el de la spec.
+    #[error("{motivo}")]
+    ModeloPedidoNoCorre {
+        modelo: crate::api::vocab::ModelId,
+        motivo: String,
+        needed_mb: u32,
+        margen_mb: u32,
+        free_mb: u32,
+    },
     #[error("proveedor: {0}")]
     Provider(ProviderError),
     #[error("se agotó el tiempo del plan")]
@@ -49,6 +66,7 @@ impl BrainError {
             // La misma frase que da `Display`: duplicarla aquí es tener dos
             // mensajes que se separan en cuanto alguien cambia uno.
             BrainError::ResourceExhausted { .. } => self.to_string(),
+            BrainError::ModeloPedidoNoCorre { .. } => self.to_string(),
             BrainError::Provider(e) => match e {
                 ProviderError::ModeloNoInstalado(m) => {
                     format!("el modelo «{m}» no está instalado")
@@ -72,7 +90,10 @@ impl BrainError {
         match self {
             BrainError::Provider(p) => !p.es_no_recuperable(),
             BrainError::Timeout | BrainError::ResourceExhausted { .. } => true,
-            BrainError::NoEligibleModel => false,
+            // Ninguna de las dos se arregla con otro modelo: una es que no hay
+            // nada que quepa, y la otra es que el producto dijo explícitamente que
+            // el suyo es el que tiene que correr.
+            BrainError::NoEligibleModel | BrainError::ModeloPedidoNoCorre { .. } => false,
             _ => false,
         }
     }

@@ -1,12 +1,13 @@
 //! El Selector: elige el `ModelId`. El Governor dice qué cabe; el Planner firma.
 //! Nunca «el más grande»: se recorre de tier bajo hacia arriba y se respeta el
-//! modelo pedido si cabe.
+//! modelo pedido si cabe. Con `respetarModelo` del config, además, el pedido manda
+//! aunque no quepa: se falla con las cifras del Governor y no se firma otro.
 
 use crate::api::error::BrainError;
 use crate::api::request::BrainRequest;
 use crate::api::vocab::{ExecutionPolicy, Level, ModelId, ModelTarget};
 use crate::decision::DecisionResult;
-use crate::models::{ModelInfo, Registry};
+use crate::models::{ModelInfo, ModelKind, Registry};
 use crate::resources::{Consejo, Governor};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,17 +57,115 @@ fn ram_conocida(m: &ModelInfo, nivel: Level) -> u64 {
     m.ram_para(nivel.num_ctx_minimo()).unwrap_or(u64::MAX)
 }
 
+/// Por qué un modelo que está en el registry no entra en la lista de candidatos.
+/// Son los mismos filtros de `Registry::elegibles` y de `orden_candidatos`, dichos
+/// uno a uno: «no cumple» a secas no le sirve a nadie, y quien elige el modelo tiene
+/// que poder corregirlo (bajar el nivel, cambiar el modelo, soltar la policy).
+fn no_cumple(m: &ModelInfo, d: &DecisionResult, policy: ExecutionPolicy) -> Vec<String> {
+    let mut v = Vec::new();
+    if m.kind != ModelKind::Generativo {
+        v.push("es un modelo de decisión: no responde al usuario".to_string());
+    }
+    if m.max_ctx < d.level.num_ctx_minimo() {
+        v.push(format!(
+            "su contexto máximo ({}) no llega a los {} que exige {:?}",
+            m.max_ctx,
+            d.level.num_ctx_minimo(),
+            d.level
+        ));
+    }
+    if d.necesita_tools() && !m.supports_tools {
+        v.push("el contrato del Plan pide tools y el modelo no las declara".to_string());
+    }
+    match policy {
+        ExecutionPolicy::LocalOnly | ExecutionPolicy::LocalPreferred if !m.local => {
+            v.push(format!("la policy {policy:?} no admite un modelo de nube"))
+        }
+        ExecutionPolicy::CloudOnly if m.local => {
+            v.push(format!("la policy {policy:?} no admite un modelo local"))
+        }
+        _ => {}
+    }
+    match d.model_target {
+        ModelTarget::Perfil(p) if m.profile != p => v.push(format!(
+            "el Plan pidió el perfil {p:?} y este modelo es {:?}",
+            m.profile
+        )),
+        ModelTarget::Tier(t) if m.tier < t => {
+            v.push(format!("el Plan pidió tier ≥ {t} y este es tier {}", m.tier))
+        }
+        _ => {}
+    }
+    v
+}
+
+/// La negativa de `respetarModelo`: el producto eligió y su modelo no puede correr.
+/// Se falla **antes** de candidatear a los demás, que es justo lo que la opción
+/// quita. Las cifras son las del consejo que ya dio el Governor —el margen con el
+/// que comprobó, no el de la spec—, y la frase es la suya: decir otras cifras aquí
+/// sería explicar un rechazo que no se hizo.
+fn negativa(
+    m: &ModelInfo,
+    consejo: &Consejo,
+    d: &DecisionResult,
+    policy: ExecutionPolicy,
+) -> BrainError {
+    let mut porque = Vec::new();
+    if !consejo.cabe {
+        porque.push(consejo.porque.clone());
+    }
+    let sin_cumplir = no_cumple(m, d, policy);
+    if !sin_cumplir.is_empty() {
+        // La frase del Governor ya nombra al modelo; las cláusulas de capacidad van
+        // detrás, y solo llevan el nombre delante cuando el Governor no habló porque
+        // el modelo sí cabía. El aviso tiene que nombrar siempre al pedido.
+        let l = sin_cumplir.join(" · ");
+        porque.push(if porque.is_empty() {
+            format!("«{}» no cumple lo que pide este Plan: {l}", m.id)
+        } else {
+            l
+        });
+    }
+    BrainError::ModeloPedidoNoCorre {
+        modelo: m.id.clone(),
+        motivo: porque.join(" · "),
+        needed_mb: consejo
+            .ram_mb
+            .map(|r| (r + consejo.margen_mb) as u32)
+            .unwrap_or(0),
+        margen_mb: consejo.margen_mb as u32,
+        free_mb: consejo.libre_mb.unwrap_or(0) as u32,
+    }
+}
+
 pub fn elegir(
     req: &BrainRequest,
     d: &DecisionResult,
     registry: &Registry,
     governor: &Governor,
     sonda: &dyn crate::resources::ResourceProbe,
+    respetar_modelo: bool,
 ) -> Result<Eleccion, BrainError> {
     if registry.modelos.is_empty() {
         return Err(BrainError::Config(crate::config::ConfigError::SinBackend));
     }
     let candidatos = orden_candidatos(req, d, registry);
+
+    // `respetarModelo`: se comprueba el pedido antes de mirar a los demás, y se
+    // comprueba aunque no esté en la lista de candidatos —si el Plan le pide tools
+    // que no declara, tampoco está, y el aviso tiene que nombrar su modelo—.
+    if respetar_modelo {
+        if let Some(pedido) = req.preferred_model.as_deref() {
+            if let Some(m) = registry.find(pedido) {
+                let consejo = governor.aconsejar(sonda, m, d.level);
+                let en_candidatos = candidatos.iter().any(|c| c.id == m.id);
+                if !consejo.cabe || !en_candidatos {
+                    return Err(negativa(m, &consejo, d, req.policies));
+                }
+            }
+        }
+    }
+
     if candidatos.is_empty() {
         return Err(BrainError::NoEligibleModel);
     }
@@ -216,7 +315,15 @@ mod tests {
             libre: Some(8000),
             ..Default::default()
         };
-        let e = elegir(&req, &decision(Level::N1, vec![]), &r, &gov(), &sonda).unwrap();
+        let e = elegir(
+            &req,
+            &decision(Level::N1, vec![]),
+            &r,
+            &gov(),
+            &sonda,
+            false,
+        )
+        .unwrap();
         assert_eq!(e.modelo.id, "medio:4b");
         assert!(e.porque.contains("el que elegiste"), "{}", e.porque);
     }
@@ -236,6 +343,7 @@ mod tests {
             &r,
             &gov(),
             &sonda,
+            false,
         )
         .unwrap();
         assert_ne!(e.modelo.id, "grande:9b");
@@ -257,6 +365,7 @@ mod tests {
             &r,
             &gov(),
             &sonda,
+            false,
         )
         .unwrap();
         // N2 pide tools: nano:0.8b no las declara, así que gana el tier 2 local.
@@ -280,6 +389,7 @@ mod tests {
             &r,
             &gov(),
             &sonda,
+            false,
         );
         let err = e.unwrap_err();
         assert!(matches!(err, BrainError::ResourceExhausted { .. }), "{err:?}");
@@ -295,6 +405,7 @@ mod tests {
             &Registry::default(),
             &gov(),
             &SondaFija::default(),
+            false,
         );
         assert!(matches!(
             e,
@@ -310,7 +421,8 @@ mod tests {
             libre: Some(300),
             ..Default::default()
         };
-        let err = elegir(&req, &decision(Level::N0, vec![]), &r, &gov(), &sonda).unwrap_err();
+        let err = elegir(&req, &decision(Level::N0, vec![]), &r, &gov(), &sonda, false)
+            .unwrap_err();
         match err {
             BrainError::ResourceExhausted { needed_mb, free_mb } => {
                 // 900 del modelo + 1500 del margen que exige el Governor: las dos

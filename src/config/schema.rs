@@ -111,6 +111,17 @@ pub struct BrainConfig {
     /// la temperatura no hace determinista nada: cambia el punto de partida del
     /// muestreo, no el muestreo.
     pub semilla: Option<u64>,
+    /// **Apagado por defecto.** Con `true`, el modelo que pidió el producto es el
+    /// que corre: si no es elegible (no cabe, o no cumple lo que firma el Plan) la
+    /// corrida falla con las cifras del Governor en vez de firmar otro modelo. El
+    /// README reparte el trabajo —«el producto elige el modelo y ejecuta; el Brain
+    /// manda la corrida»—, y §II.8 solo prometía respetar el pedido *si cabe*; esto
+    /// es la otra mitad: si no cabe, no corre nada y se dice. Sustituirlo además
+    /// cuesta una carga que nadie pidió (medido en Hatboo el 04-10: 34,7 s y 3
+    /// tokens en un «Hola.» por haber tenido que cargar otro).
+    /// No toca la escalada después de un fallo real (`escalate_to`): esa sigue
+    /// subiendo de tier y firmando otro modelo si hace falta.
+    pub respetar_modelo: bool,
 }
 
 impl Default for BrainConfig {
@@ -128,6 +139,7 @@ impl Default for BrainConfig {
             thinking_ceiling: None,
             temperatura: None,
             semilla: None,
+            respetar_modelo: false,
         }
     }
 }
@@ -213,6 +225,20 @@ mod tests {
         let c: BrainConfig = serde_json::from_str(r#"{"temperatura": 0.0, "semilla": 42}"#).unwrap();
         assert_eq!(c.temperatura, Some(0.0));
         assert_eq!(c.semilla, Some(42));
+    }
+
+    /// Lo mismo con el interruptor del modelo: el producto lo escribe en su JSON.
+    /// Apagado es el default — un config que no dice nada no puede cambiar la
+    /// conducta medida de nadie — y `true` se lee por el nombre camelCase.
+    #[test]
+    fn respetar_el_modelo_pedido_se_pide_por_config() {
+        let vacio: BrainConfig = serde_json::from_str("{}").unwrap();
+        assert!(!vacio.respetar_modelo, "el default es desviar como hasta hoy");
+        let c: BrainConfig = serde_json::from_str(r#"{"respetarModelo": true}"#).unwrap();
+        assert!(c.respetar_modelo);
+        // Y no se le olvida a nadie al serializar: el round-trip lo conserva.
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.contains("\"respetarModelo\":true"), "{s}");
     }
 
     #[test]

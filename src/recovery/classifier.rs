@@ -31,6 +31,11 @@ pub fn clasificar(o: &Origen) -> FailureClass {
         Origen::Error(e) => match e {
             BrainError::Timeout => FailureClass::Entorno,
             BrainError::ResourceExhausted { .. } => FailureClass::Entorno,
+            // Es el entorno también cuando el pedido iba en serio: la máquina no
+            // tiene sitio para el modelo que eligió el producto. No se classifya de
+            // `ModelCapability` porque subir de tier justo sería proponer el modelo
+            // grande que no cabe; esta corrida no escala, se para y lo dice.
+            BrainError::ModeloPedidoNoCorre { .. } => FailureClass::Entorno,
             BrainError::Provider(p) => match p {
                 // No está instalado o falta la clave: no es capacidad del modelo,
                 // es que el entorno no está listo.
