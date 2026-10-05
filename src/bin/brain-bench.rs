@@ -1661,56 +1661,97 @@ struct Volcado {
 /// en TTFT, así que afirmar algo con una corrida sería vender ruido.
 #[derive(Debug, Default, Clone)]
 struct Bando {
-    modelo: String,
     entradas: usize,
     duracion_ms: f64,
+    /// Rango de las medianas por entrada (mínimo y máximo). §9 pide medianas **y
+    /// rango**: en esta máquina dos pasadas de la misma petición se desviaron
+    /// +34 % / −11 %, y una mediana sin rango es un número huérfano.
+    duracion_min: f64,
+    duracion_max: f64,
     ttft_ms: f64,
     tokens_salida: f64,
+    tokens_min: f64,
+    tokens_max: f64,
     recargas: f64,
     reintentos: f64,
     pasa: usize,
     falla: usize,
     sin_comprobar: usize,
     verificados: usize,
+    /// Entradas que **no llegaron a generar**: en `brain` son los turnos que el
+    /// Governor rechazó por falta de RAM, y valen 2 ms y 0 tokens. Contarlos como
+    /// velocidad es la mentira que esta guarda viene a impedir.
+    sin_salida: usize,
 }
 
 /// Dos medianas seguidas: primero entre las repeticiones de una misma entrada,
 /// después entre entradas. Si no, una categoría con seis repeticiones pesaría
 /// más que una con una.
+///
+/// **Dentro de cada entrada solo entran las repeticiones que generaron.** Con las
+/// rechazadas dentro, una entrada con dos rechazos de 2 ms y una generación de
+/// 900 ms saca mediana 2 ms: la Suite del coder salió así, con una «duración» de
+/// 0 ms que no era velocidad sino el modelo sin encender.
+/// Si esta repetición llegó a generar texto. Un `None` o un cero es un turno que
+/// el Governor rechazó antes de encender el modelo.
+fn genero(c: &Corrida) -> bool {
+    c.tokens_salida.unwrap_or(0) > 0
+}
+
 fn bando_de(corridas: &[Corrida]) -> Bando {
     let mut por_entrada: std::collections::BTreeMap<&str, Vec<&Corrida>> = Default::default();
     for c in corridas {
         por_entrada.entry(c.entrada.as_str()).or_default().push(c);
     }
-    let de = |pick: &dyn Fn(&Corrida) -> f64| -> f64 {
+    let de = |pick: &dyn Fn(&Corrida) -> f64| -> (f64, f64, f64) {
         let por: Vec<f64> = por_entrada
             .values()
-            .map(|g| mediana(&g.iter().map(|c| pick(c)).collect::<Vec<_>>()))
+            .filter_map(|g| {
+                let v: Vec<f64> = g.iter().filter(|c| genero(c)).map(|c| pick(c)).collect();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(mediana(&v))
+                }
+            })
             .collect();
-        mediana(&por)
+        if por.is_empty() {
+            return (0.0, 0.0, 0.0);
+        }
+        (
+            mediana(&por),
+            por.iter().copied().fold(f64::INFINITY, f64::min),
+            por.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        )
     };
+    let (duracion_ms, duracion_min, duracion_max) = de(&|c| c.duracion_ms as f64);
+    let (ttft_ms, _, _) = de(&|c| c.ttft_ms.unwrap_or(0) as f64);
+    let (tokens_salida, tokens_min, tokens_max) = de(&|c| c.tokens_salida.unwrap_or(0) as f64);
     let cuenta = |etiqueta: &str| corridas.iter().filter(|c| c.resultado == etiqueta).count();
-    // Los contadores van en **suma** (suma de las medianas por entrada), no en
-    // mediana: una recarga en una de cuatro entradas es una recarga pagada, y la
-    // mediana la convertiría en cero.
+    // Los contadores de **eventos** (recargas, reintentos) van en suma directa
+    // sobre las corridas, no en mediana por entrada: una recarga en una de tres
+    // repeticiones es una recarga pagada — 3,7 s de recarga de contexto medidos en
+    // esta máquina — y la mediana la convertía en cero. El informe de 2026-10-05
+    // decía «recargas 0» en un bando que el propio pase había contado 24.
     let total = |pick: &dyn Fn(&Corrida) -> f64| -> f64 {
-        por_entrada
-            .values()
-            .map(|g| mediana(&g.iter().map(|c| pick(c)).collect::<Vec<_>>()))
-            .sum()
+        corridas.iter().map(pick).sum()
     };
     Bando {
-        modelo: corridas.first().map(|c| c.modelo.clone()).unwrap_or_default(),
         entradas: por_entrada.len(),
-        duracion_ms: de(&|c| c.duracion_ms as f64),
-        ttft_ms: de(&|c| c.ttft_ms.unwrap_or(0) as f64),
-        tokens_salida: de(&|c| c.tokens_salida.unwrap_or(0) as f64),
+        duracion_ms,
+        duracion_min,
+        duracion_max,
+        ttft_ms,
+        tokens_salida,
+        tokens_min,
+        tokens_max,
         recargas: total(&|c| c.recargas as f64),
         reintentos: total(&|c| c.reintentos as f64),
         pasa: cuenta("pasa"),
         falla: cuenta("falla"),
         sin_comprobar: cuenta("sin_comprobar"),
         verificados: corridas.iter().filter(|c| c.estado_salida == "Verificado").count(),
+        sin_salida: por_entrada.values().filter(|g| !g.iter().any(|c| genero(c))).count(),
     }
 }
 
@@ -1738,18 +1779,77 @@ fn veredicto(a: f64, b: f64, reps: u32) -> &'static str {
     }
 }
 
-fn por_modelo(v: &Volcado) -> std::collections::BTreeMap<String, Bando> {
+fn por_modelo(v: &Volcado) -> std::collections::BTreeMap<String, Vec<Corrida>> {
     let mut m: std::collections::BTreeMap<String, Vec<Corrida>> = Default::default();
     for c in &v.corridas {
         m.entry(c.modelo.clone()).or_default().push(c.clone());
     }
-    m.into_iter().map(|(modelo, g)| {
-        let mut b = bando_de(&g);
-        if b.modelo.is_empty() {
-            b.modelo = modelo.clone();
-        }
-        (modelo, b)
-    }).collect()
+    m
+}
+
+/// Las entradas que de verdad generaron en un grupo de corridas.
+fn generaron(corridas: &[Corrida]) -> std::collections::BTreeSet<String> {
+    corridas
+        .iter()
+        .filter(|c| c.tokens_salida.unwrap_or(0) > 0)
+        .map(|c| c.entrada.clone())
+        .collect()
+}
+
+/// §9 hecho bien: **se comparan las entradas que generaron en los dos bandos**, no
+/// dos conjuntos distintos. El Brain rechaza por RAM y esas entradas valen 0 ms;
+/// si se dejan dentro, el informe vende «-99,9 % de duración» por no haber
+/// contestado. Y si se comparan 24 entradas contra 12, la mediana tampoco es una
+/// comparación.
+///
+/// Devuelve los dos bandos recortados y **cuántas entradas se quedaron fuera por
+/// culpa del contrario** en cada lado: `fuera_a` son las que generó `a` y no
+/// generó `b`. La atribución de quién falló la lleva `sin_salida` de cada bando,
+/// que es lo que se imprime arriba; mezclar las dos cifras es lo que hacía decir
+/// «no generaron en baseline» de entradas que el baseline generó todas.
+fn emparejar(a: &[Corrida], b: &[Corrida]) -> (Vec<Corrida>, Vec<Corrida>, usize, usize) {
+    let (ga, gb) = (generaron(a), generaron(b));
+    let pares: std::collections::BTreeSet<&String> = ga.intersection(&gb).collect();
+    let queda = |v: &[Corrida]| -> Vec<Corrida> {
+        v.iter().filter(|c| pares.contains(&c.entrada)).cloned().collect()
+    };
+    (
+        queda(a),
+        queda(b),
+        ga.len() - pares.len(),
+        gb.len() - pares.len(),
+    )
+}
+
+/// «58/72 (sin generar 14)»: la cobertura del bando. Va en la portada del informe
+/// porque sin ella no se puede saber si las medianas de coste hablan de respuestas
+/// o de rechazos.
+fn formato(b: &Bando) -> String {
+    if b.sin_salida == 0 {
+        format!("{}/{}", b.entradas, b.entradas)
+    } else {
+        format!(
+            "{}/{} (sin generar {})",
+            b.entradas - b.sin_salida,
+            b.entradas,
+            b.sin_salida
+        )
+    }
+}
+
+/// Las tres palabras que pide §9, por modelo. `no se puede afirmar` no es una
+/// cortesanía: es el caso en el que no hay entradas que generaron en los dos bandos,
+/// y decir «mejora» ahí sería vender una ausencia como un resultado.
+fn veredicto_de(mejoras: usize, regresiones: usize, comparable: bool) -> &'static str {
+    if !comparable {
+        "NO SE PUEDE AFIRMAR"
+    } else if regresiones > 0 {
+        "REGRESIÓN"
+    } else if mejoras > 0 {
+        "mejora"
+    } else {
+        "dentro del ruido"
+    }
 }
 
 fn linea(nombre: &str, a: f64, b: f64, reps: u32) -> String {
@@ -1774,7 +1874,7 @@ fn comparar(a_ruta: &Path, b_ruta: &Path, informe: Option<&Path>) -> Result<(), 
     if a.corridas.is_empty() || b.corridas.is_empty() {
         return Err("uno de los dos volcados no tiene corridas".into());
     }
-    let (ba, bb) = (por_modelo(&a), por_modelo(&b));
+    let (ga, gb) = (por_modelo(&a), por_modelo(&b));
     let reps = a.reps.min(b.reps);
     let mut md = String::new();
     md.push_str("# Baseline vs Brain (§9)\n\n");
@@ -1788,56 +1888,138 @@ fn comparar(a_ruta: &Path, b_ruta: &Path, informe: Option<&Path>) -> Result<(), 
         if a.brain_version.is_empty() { "?" } else { &a.brain_version },
         if b.brain_version.is_empty() { "?" } else { &b.brain_version },
     ));
-    md.push_str("- umbral de regresión 5 % sobre medianas; con menos de 3 repeticiones **no se afirma nada** (ruido medido por corrida: +34 % / −11 %).\n\n");
+    md.push_str("- umbral de regresión 5 % sobre medianas; con menos de 3 repeticiones **no se afirma nada** (ruido medido por corrida: +34 % / −11 %).\n");
+    md.push_str("- **solo se comparan las entradas que generaron en los dos bandos**: una entrada que el Governor rechazó no es una respuesta rápida, y mezclarlas da «-99,9 % de duración» sin haber contestado. Lo que se queda fuera va escrito abajo.\n\n");
 
     let mut regresiones = 0;
     let mut mejoras = 0;
-    for (modelo, bando_a) in &ba {
-        let Some(bando_b) = bb.get(modelo) else {
+    let mut sin_comparar = 0;
+    for (modelo, ca) in &ga {
+        let Some(cb) = gb.get(modelo) else {
             println!("· {modelo}: solo está en un fichero, no hay con qué comparar.");
             md.push_str(&format!("- **{modelo}**: solo en un fichero.\n"));
             continue;
         };
-        println!("\n== {modelo} · {} entradas vs {} entradas", bando_a.entradas, bando_b.entradas);
+        // Primero el retrato completo de cada bando (para decir la cobertura), y
+        // después la comparación, que va sobre el emparejamiento.
+        let (todo_a, todo_b) = (bando_de(ca), bando_de(cb));
+        let (pa, pb, fuera_a, fuera_b) = emparejar(ca, cb);
+        let (bando_a, bando_b) = (bando_de(&pa), bando_de(&pb));
+        println!(
+            "\n== {modelo} · {} entradas en la suite",
+            todo_a.entradas.max(todo_b.entradas)
+        );
+        let cobertura = format!(
+            "  {:<14} {:>12} → {:>12}",
+            "generaron", formato(&todo_a), formato(&todo_b)
+        );
+        println!("{cobertura}");
         md.push_str(&format!("## {modelo}\n\n```text\n"));
+        md.push_str(&format!("{cobertura}\n"));
+        if bando_a.entradas == 0 {
+            let v = veredicto_de(0, 0, false);
+            println!("  Veredicto {modelo}: {v} — ninguna entrada generó en los dos bandos.");
+            md.push_str(&format!("**Veredicto {modelo}**: {v} — ninguna entrada generó en los dos bandos, así que no hay medianas que comparar.\n\n"));
+            sin_comparar += 1;
+            continue;
+        }
+        if fuera_a > 0 || fuera_b > 0 {
+            println!(
+                "  · Comparado sobre **{} entradas** (las que generaron en los dos). Fuera: {fuera_a} \
+                 que generó el baseline y no llegó a generar el brain, {fuera_b} al revés.",
+                bando_a.entradas
+            );
+            md.push_str(&format!(
+                "Comparado sobre {} entradas (las que generaron en los dos bandos). Fuera: {fuera_a} generadas solo en baseline, {fuera_b} solo en brain.\n",
+                bando_a.entradas
+            ));
+        }
+        // Dos preguntas distintas con dos poblaciones distintas. El **coste por
+        // respuesta** solo se puede comparar en las entradas que respondieron en
+        // los dos bandos. El **gasto total** de la pasada (recargas y reintentos)
+        // es de todo el pase: las recargas que pagó el Brain para rechazar 32
+        // entradas son dinero salido de la máquina, y contarlas solo en las 6 que
+        // sobrevivieron al emparejamiento las ocultaría.
+        let (mut mi, mut ri) = (0usize, 0usize);
         for (nombre, x, y) in [
             ("duración ms", bando_a.duracion_ms, bando_b.duracion_ms),
             ("ttft ms", bando_a.ttft_ms, bando_b.ttft_ms),
             ("tokens salida", bando_a.tokens_salida, bando_b.tokens_salida),
-            ("recargas total", bando_a.recargas, bando_b.recargas),
-            ("reintentos tot", bando_a.reintentos, bando_b.reintentos),
         ] {
             let l = linea(nombre, x, y, reps);
             println!("{l}");
             if l.ends_with("REGRESIÓN") {
-                regresiones += 1;
+                ri += 1;
             } else if l.ends_with("mejora") {
-                mejoras += 1;
+                mi += 1;
             }
+            md.push_str(&format!("{l}\n"));
+        }
+        let rangos = format!(
+            "  {:<14} {:>12} → {:>12}\n  {:<14} {:>12} → {:>12}",
+            "rango dur ms",
+            format!("[{:.0}–{:.0}]", bando_a.duracion_min, bando_a.duracion_max),
+            format!("[{:.0}–{:.0}]", bando_b.duracion_min, bando_b.duracion_max),
+            "rango toks",
+            format!("[{:.0}–{:.0}]", bando_a.tokens_min, bando_a.tokens_max),
+            format!("[{:.0}–{:.0}]", bando_b.tokens_min, bando_b.tokens_max),
+        );
+        println!("{rangos}");
+        md.push_str(&format!("{rangos}\n"));
+        // El gasto no entra en el veredicto de coste: son contadores de otra
+        // naturaleza (una recarga son 3,7 s de máquina, no una respuesta más lenta)
+        // y mezclarlos con las medianas de duración contaría dos veces lo mismo.
+        for (nombre, x, y) in [
+            ("recargas tot", todo_a.recargas, todo_b.recargas),
+            ("reintentos tot", todo_a.reintentos, todo_b.reintentos),
+        ] {
+            let mut l = linea(nombre, x, y, reps);
+            // Un gasto que solo tiene un lado no es una «mejora»: es el coste de
+            // no haber contestado. Se dice al lado del número.
+            if l.ends_with("sin base") && x == 0.0 && y > 0.0 {
+                l = format!("{l}  (gasto nuevo del brain, no evitado)");
+            }
+            println!("{l}");
             md.push_str(&format!("{l}\n"));
         }
         let calidad = format!(
             "  {:<14} {:>12} → {:>12}",
             "checks ✓/✗/—",
-            format!("{} / {} / {}", bando_a.pasa, bando_a.falla, bando_a.sin_comprobar),
-            format!("{} / {} / {}", bando_b.pasa, bando_b.falla, bando_b.sin_comprobar),
+            format!("{} / {} / {}", todo_a.pasa, todo_a.falla, todo_a.sin_comprobar),
+            format!("{} / {} / {}", todo_b.pasa, todo_b.falla, todo_b.sin_comprobar),
         );
         let verif = format!(
             "  {:<14} {:>12} → {:>12}",
-            "Verificado", bando_a.verificados, bando_b.verificados
+            "Verificado", todo_a.verificados, todo_b.verificados
         );
         println!("{calidad}\n{verif}");
-        md.push_str(&format!("{calidad}\n{verif}\n```\n\n"));
+        let v = veredicto_de(mi, ri, true);
+        println!("  Veredicto {modelo}: {v}  ({mi} métricas mejor, {ri} peor, sobre {} entradas comparables)", bando_a.entradas);
+        md.push_str(&format!(
+            "{calidad}\n{verif}\n```\n\n**Veredicto {modelo}**: {v} — {mi} métricas por debajo del umbral y {ri} por encima, sobre {} entradas comparables.\n\n",
+            bando_a.entradas
+        ));
+        regresiones += ri;
+        mejoras += mi;
     }
-    println!(
-        "\nVeredicto: {regresiones} métricas por encima del umbral y {mejoras} por debajo, sobre {reps} repeticiones compartidas."
-    );
+    let resumen = if sin_comparar > 0 && regresiones + mejoras == 0 && sin_comparar == ga.len() {
+        "NO SE PUEDE AFIRMAR: ningún modelo tiene entradas que generaron en los dos bandos.".to_string()
+    } else if regresiones > 0 {
+        format!(
+            "REGRESIÓN en {regresiones} métricas de coste por respuesta ({mejoras} por debajo del umbral), sobre {reps} repeticiones compartidas. Ver arriba el veredicto de cada modelo: los dos no dicen lo mismo."
+        )
+    } else if mejoras > 0 {
+        format!(
+            "mejora en {mejoras} métricas de coste por respuesta, sin ninguna por encima del umbral, sobre {reps} repeticiones compartidas."
+        )
+    } else {
+        format!("dentro del ruido: 0 métricas fuera del umbral del 5 %, sobre {reps} repeticiones.")
+    };
+    println!("\nVeredicto: {resumen}");
     if reps < 3 {
         println!("Con menos de 3 repeticiones esto es lectura, no veredicto: corre `--reps 3`.");
     }
-    md.push_str(&format!(
-        "**Veredicto**: {regresiones} métricas por encima del umbral y {mejoras} por debajo, sobre {reps} repeticiones compartidas.\n"
-    ));
+    md.push_str(&format!("**Veredicto**: {resumen}\n"));
     if let Some(ruta) = informe {
         std::fs::write(ruta, md).map_err(|e| format!("no se pudo escribir el informe: {e}"))?;
         println!("informe en {}", ruta.display());
@@ -1889,5 +2071,91 @@ mod tests_comparar {
         assert_eq!(b.recargas, 1.0, "los contadores van en suma");
         assert_eq!((b.pasa, b.falla, b.sin_comprobar), (2, 1, 1));
         assert_eq!(b.verificados, 2);
+    }
+
+    /// El caso del informe del 05-10 con `qwen2.5-coder:1.5b`: al Brain el
+    /// Governor le rechazó 32 de 72 corridas a 2 ms y 0 tokens, y la mediana de
+    /// duración del bando salió **0 ms**, más rápido que el modelo funcionando.
+    /// Era la duración de no haber encendido nada.
+    #[test]
+    fn un_rechazo_no_es_una_respuesta_rapida() {
+        let corridas = vec![
+            c(serde_json::json!({"modelo":"m","entrada":"a","duracion_ms":900,"tokens_salida":40,"resultado":"pasa","estado_salida":"Verificado"})),
+            c(serde_json::json!({"modelo":"m","entrada":"b","duracion_ms":2,"tokens_salida":0,"resultado":"falla","estado_salida":"Rechazado"})),
+            c(serde_json::json!({"modelo":"m","entrada":"c","duracion_ms":1100,"tokens_salida":60,"resultado":"pasa","estado_salida":"Propuesto"})),
+            // La que rompía la mediana: dos repeticiones rechazadas y una que sí
+            // generó, dentro de la misma entrada.
+            c(serde_json::json!({"modelo":"m","entrada":"d","duracion_ms":2,"tokens_salida":0,"resultado":"falla","estado_salida":"Rechazado"})),
+            c(serde_json::json!({"modelo":"m","entrada":"d","duracion_ms":3,"tokens_salida":0,"resultado":"falla","estado_salida":"Rechazado"})),
+            c(serde_json::json!({"modelo":"m","entrada":"d","duracion_ms":700,"tokens_salida":20,"resultado":"pasa","estado_salida":"Propuesto"})),
+        ];
+        let b = bando_de(&corridas);
+        assert_eq!(b.entradas, 4);
+        assert_eq!(b.sin_salida, 1, "una entrada no llegó a generar en ninguna repetición");
+        // Medianas por entrada sobre lo que generó: [900, 1100, 700] → 900. Con
+        // los rechazos dentro salía 2 ms y el informe lo llamaba velocidad.
+        assert_eq!(b.duracion_ms, 900.0, "la mediana ignora las repeticiones que no generaron");
+        assert_eq!(b.tokens_salida, 40.0, "ídem con los tokens");
+        assert_eq!(formato(&b), "3/4 (sin generar 1)");
+    }
+
+    #[test]
+    fn el_emparejamiento_compara_lo_que_corrio_en_los_dos_bandos() {
+        let corrio = |e: &str, ms: u64| c(serde_json::json!({"modelo":"m","entrada":e,"duracion_ms":ms,"tokens_salida":30,"resultado":"pasa","estado_salida":"Propuesto"}));
+        let rechazo = |e: &str| c(serde_json::json!({"modelo":"m","entrada":e,"duracion_ms":2,"tokens_salida":0,"resultado":"falla","estado_salida":"Rechazado"}));
+        let a = vec![corrio("x", 900), corrio("y", 1000), corrio("z", 1100)];
+        let b = vec![corrio("x", 880), rechazo("y"), rechazo("z")];
+        let (pa, pb, fuera_a, fuera_b) = emparejar(&a, &b);
+        let (ba, bb) = (bando_de(&pa), bando_de(&pb));
+        assert_eq!((ba.entradas, bb.entradas), (1, 1), "solo «x» corrió en los dos");
+        assert_eq!(
+            (fuera_a, fuera_b),
+            (2, 0),
+            "las dos entradas que se pierden son las que solo generó el primer bando"
+        );
+        assert_eq!((ba.duracion_ms, bb.duracion_ms), (900.0, 880.0));
+        assert_eq!(bb.sin_salida, 0, "el par emparejado generó por construcción");
+        // Y sin emparejar, el bando `b` ya no miente por las repeticiones
+        // rechazadas: mediana sobre lo que generó = 880, no 2 ms.
+        assert_eq!(bando_de(&b).duracion_ms, 880.0);
+        assert_eq!(
+            bando_de(&b).sin_salida,
+            2,
+            "las dos que no encendieron el modelo, contadas aparte"
+        );
+    }
+
+    /// El otro agujero del informe del 05-10: el pase de `qwen2.5-coder:1.5b`
+    /// cerró su resumen diciendo «reintentos 16 · recargas 24» y el `--comparar`
+    /// de ese mismo volcado sacaba **0**. Era la mediana por entrada: una recarga
+    /// en una de tres repeticiones promedia a cero, y aquí una recarga son 3,7 s
+    /// medidos. Los contadores de eventos van en suma sobre las corridas.
+    #[test]
+    fn una_recarga_entre_tres_repeticiones_se_paga_y_se_cuenta() {
+        let rep = |rec: u32, r: u8| {
+            c(serde_json::json!({"modelo":"m","entrada":"a","duracion_ms":900,"tokens_salida":40,
+                                 "recargas":rec,"reintentos":r,"resultado":"pasa","estado_salida":"Propuesto"}))
+        };
+        let b = bando_de(&[rep(1, 0), rep(0, 1), rep(0, 0)]);
+        assert_eq!(b.recargas, 1.0, "una recarga pagada, no una mediana a cero");
+        assert_eq!(b.reintentos, 1.0, "ídem con los reintentos");
+        assert_eq!(b.entradas, 1);
+    }
+
+    /// El veredicto en las tres palabras de §9, y el rango que exige el gate.
+    #[test]
+    fn el_veredicto_se_dice_en_tres_palabras_y_el_rango_no_se_pierde() {
+        assert_eq!(veredicto_de(2, 0, true), "mejora");
+        assert_eq!(veredicto_de(0, 2, true), "REGRESIÓN");
+        assert_eq!(veredicto_de(1, 1, true), "REGRESIÓN", "una regresión pesa más que una mejora: no se promedian");
+        assert_eq!(veredicto_de(0, 0, true), "dentro del ruido");
+        assert_eq!(veredicto_de(0, 0, false), "NO SE PUEDE AFIRMAR");
+
+        let v = |e: &str, ms: u64| {
+            c(serde_json::json!({"modelo":"m","entrada":e,"duracion_ms":ms,"tokens_salida":20,"resultado":"pasa","estado_salida":"Propuesto"}))
+        };
+        let b = bando_de(&[v("a", 100), v("b", 900), v("c", 500)]);
+        assert_eq!((b.duracion_ms, b.duracion_min, b.duracion_max), (500.0, 100.0, 900.0));
+        assert_eq!((b.tokens_min, b.tokens_max), (20.0, 20.0));
     }
 }

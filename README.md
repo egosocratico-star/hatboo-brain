@@ -116,11 +116,13 @@ Lo que no se pudo comprobar se reporta como `sin_comprobar`, nunca como acierto.
 
 ## Estado
 
-Compila y pasan las pruebas: **350 verdes** — 240 unitarias del crate, 109 en los 9
-ficheros de integración de §10 (context 8 · decision 18 · golden 5 · planner 19 ·
-prompt 9 · recovery 13 · resources 11 · security 10 · verification 16) y 1 doc-test.
-`clippy --all-targets --all-features -D warnings` a cero y **sin un solo `#[allow]`**;
-la misma tanda corre en GitHub (`windows-latest`, rama `main`).
+Compila y pasan las pruebas: **352 verdes** con las features por defecto (`ollama`) —
+229 unitarias del lib, 7 del bin `brain-bench`, 115 en los 9 ficheros de integración de
+§10 (context 8 · decision 20 · golden 5 · planner 19 · prompt 9 · recovery 13 ·
+resources 15 · security 10 · verification 16) y 1 doc-test—, y **370 con
+`--all-features`** (las 18 de encima son las rutas de OpenAI, Anthropic y genérico; es
+lo que corre la CI). `clippy --all-targets --all-features -D warnings` a cero y **sin
+un solo `#[allow]`**; la misma tanda corre en GitHub (`windows-latest`, rama `main`).
 
 La batería `--decisiones` mide el Engine sobre `benchmarks/base.json`: **24/24 en nivel
 y 24/24 en riesgo** con `--split dev` (lo que corre la CI) y 6/6 con `--split
@@ -129,13 +131,29 @@ así que hoy sirve como detector de regresiones y no para descubrir cosas — pa
 hacen falta entradas nuevas. `--decisiones` **sale con código 0 aunque baje la
 precisión**: en la CI es lectura, no umbral.
 
-Sin construir: las fases 6 (logprobs) y 7 (backend de decisión tipo Laya), y no hay
-modo de encenderlas por error — `Brain` rechaza la configuración nombrando el campo
-del JSON y la fase que falta. La Fase 8 (auto-mejora) del Plan v1.4 tampoco está.
+**La comparación de §9 ya está corrida**, con su informe en `benchmarks/`
+(`m0-qwen3.5_0.8b.md` y `m0-qwen2.5-coder_1.5b.md`, con los volcados crudos que generan
+`--salida` y el veredicto del `--comparar`): cuatro pasadas limpias del split `dev`,
+tres repeticiones, `temperature 0` y semilla fija, el margen del Governor en 250 MB.
+Lo que dice, en una línea: **el Brain administra, y en esta máquina eso tiene un precio
+que hasta ahora no estaba medido.** Sobre el modelo divagador (`qwen3.5:0.8b`, donde el
+baseline se iba al techo de 1024 tokens) el Plan firma 192 y la mediana cae de 84,2 s a
+17,7 s. Sobre el modelo que ya respondía corto (`qwen2.5-coder:1.5b`, 3,0 s y 14 tokens)
+la administración **cuesta**: 13,5 s, +344 %, con 24 recargas de contexto y 16
+reintentos. Y en ese segundo modelo es donde por fin aparece `Verificado` (9 de 72,
+frente a 0), que es lo que la verificación determinista venía a buscar. El número no
+autoriza a encender el Brain por defecto: autoriza a saber qué se paga.
 
-Pendiente de medir, no de escribir: la comparación de §9 contra la línea base real
-necesita correr el arnés con un proveedor cargado. Las cifras de RAM de este repo son
-de una máquina (8,45 GB sin GPU, Ollama 0,35,1); en otra hay que volver a sondear.
+Con la Fase 6 **construida** (`logprobs` viaja, se cose y sale en `TaskMetrics`, sin
+mover ninguna decisión), lo único que sigue sin pieza es la **Fase 7** (el backend de
+decisión tipo Laya): `Brain::nuevo` rechaza la configuración nombrando el campo del JSON
+y la fase que falta, así que no hay modo de encenderla por error. La Fase 8 (auto-mejora)
+del Plan v1.4 tampoco está.
+
+Las cifras de RAM de este repo son de una máquina (8,45 GB sin GPU, Ollama 0,35); en otra
+hay que volver a sondear con `--sondear`, y la regla del §9 es que **una corrida con
+algo más compilando no es una corrida**: 3,7 s por recarga de contexto se comen cualquier
+ventana de medición.
 
 ## Pruebas
 
