@@ -22,7 +22,8 @@ pub struct Plan {
     pub model: ModelId,
     pub provider: ProviderId,
     pub execution_target: ExecutionTarget,
-    /// Siempre uno de {2048, 4096, 8192} salvo config explícita por modelo.
+    /// Siempre un peldaño de `ctx_permitidos` (por defecto {512, 1024, 2048, 4096,
+    /// 8192}), config por modelo si hace falta (§15.5).
     pub num_ctx: u32,
     pub keep_alive: KeepAlive,
     /// Cuánto razona el modelo. `off` en N0/N1, y nunca por encima del techo del

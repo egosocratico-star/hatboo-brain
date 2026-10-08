@@ -8,7 +8,7 @@ use crate::api::response::{
     BrainResult, DecisionTrace, Output, OutputStatus, TaskMetrics, ToolCall,
 };
 use crate::api::vocab::{
-    ApprovalLevel, ExecutionTarget, FailureClass, Level, ThinkingLevel, ToolId,
+    ApprovalLevel, ExecutionTarget, FailureClass, Intent, Level, ThinkingLevel, ToolId,
 };
 use crate::config::schema::BrainConfig;
 use crate::context::{self, Prioridad};
@@ -812,7 +812,7 @@ impl Brain {
 
         let tools_del_producto = req.tools.ids();
         // El system se mide antes de firmar: la invariante de presupuesto lo pide.
-        let system = self.system_de(req, &decision.tools);
+        let system = self.system_de(req, &decision.tools, decision.intent);
         // La carga del turno: lo que el usuario escribió ahora y lo que valen sus
         // turnos anteriores, por separado y en el orden del historial. Sin esto el
         // Plan firmaba «cabe» contando solo el system y el presupuesto del nivel.
@@ -857,10 +857,15 @@ impl Brain {
         registry
             .modelos
             .iter()
-            .any(|m| m.local && m.max_ctx >= d.level.num_ctx_minimo())
+            .any(|m| m.local && m.max_ctx >= d.level.num_ctx_suelo())
     }
 
-    fn system_de(&self, req: &BrainRequest, tools: &[ToolId]) -> String {
+    fn system_de(
+        &self,
+        req: &BrainRequest,
+        tools: &[ToolId],
+        intent: Intent,
+    ) -> String {
         let md = req.project.as_ref().and_then(|p| match p.trust_state {
             TrustState::Aprobado => p.hatboo_md.as_deref(),
             _ => None,
@@ -877,7 +882,7 @@ impl Brain {
             tools,
             md,
             producto.as_deref(),
-            None,
+            Some(prompt::instruccion_del_intent(intent)),
             idioma,
         )
     }
@@ -889,12 +894,17 @@ impl Brain {
         observaciones: &[String],
         estado: &EstadoTarea,
     ) -> Result<Preparado, BrainError> {
+        // Un turno sin herramientas en el Plan no abre archivos ni corre tests: las
+        // piezas de proyecto y permisos son cosas de *ese* turno, y metidas en un
+        // chat son el material con el que el modelo se va por las ramas.
+        let puede_actuar = !plan.tools.is_empty();
         let mut piezas =
-            context::sources::piezas_de_seguridad(req, &approval_texto(req.approval_level));
+            context::sources::piezas_de_seguridad(req, &approval_texto(req.approval_level), puede_actuar);
         piezas.extend(context::sources::piezas_del_pedido(
             req,
             Some(estado),
             None,
+            puede_actuar,
         ));
         for (i, o) in observaciones.iter().enumerate().rev() {
             piezas.push(crate::context::Pieza::nueva(
@@ -922,7 +932,7 @@ impl Brain {
             context::armar(piezas, plan.context_budget_tokens, self.contador.as_ref())
         };
         armado.rechazadas.extend(sensible_fuera);
-        let system = self.system_de(req, &plan.tools);
+        let system = self.system_de(req, &plan.tools, plan.intent);
         let ctx = armado.a_contexto(system.clone());
         let turno = crate::prompt::dynamic::texto_del_turno(&ctx, &req.message);
         let residente = self
@@ -969,35 +979,60 @@ impl Brain {
             timeout_s: plan.timeout_s,
             salida_json: plan.output_contract == crate::api::vocab::OutputContract::Json,
         };
+        // Lo que el Plan autoriza salir: la respuesta más el razonamiento reservado.
+        // Es lo que da el techo total de la corrida (ver `techo_total`).
+        let autorizado = plan
+            .max_output_tokens
+            .saturating_add(plan.thinking.presupuesto_tokens());
         if opts.eventos.is_some() {
             let mut stream = proveedor.stream(g).await.map_err(con_error)?;
             let mut texto = String::new();
             let mut final_r: Option<GenerationResult> = None;
+            let mut primer_token: Option<u64> = None;
             let inicio = std::time::Instant::now();
-            // El timeout del proveedor va en la petición, pero si la conexión se
-            // abre y no vuelve a enviar nada, ese timeout no llega a correr nunca:
-            // el turno queda colgado hasta que alguien cancele a mano. Aquí se le
-            // pone fecha de vencimiento al drenado del stream.
-            let limite = std::time::Duration::from_secs(plan.timeout_s.max(1) as u64);
+            // Dos relojes, no uno. `plan.timeout_s` es el de **inactividad**: lo que
+            // quiere cortar esta rama es una conexión que se abrió y dejó de mandar
+            // bytes, que es el agujero que tapaba desde el principio. El total lo fija
+            // lo que el propio Plan autorizó generar (`techo_total`): con el tope de
+            // 30 s del N0 a secas, un «hola» con el razonamiento en `Medio` moría en
+            // `Timeout` sin dejar mensaje.
+            let mut ultima_senal = std::time::Instant::now();
             loop {
-                let queda = limite.saturating_sub(inicio.elapsed());
-                if queda.is_zero() {
-                    return Err(BrainError::Timeout);
-                }
+                let queda = match plazo_del_drenado(
+                    ultima_senal.elapsed(),
+                    inicio.elapsed(),
+                    plan.timeout_s,
+                    autorizado,
+                ) {
+                    None => return Err(BrainError::Timeout),
+                    Some(q) => q,
+                };
                 if opts.cancelar.cancelado() {
                     return Err(BrainError::Cancelled);
                 }
                 match tokio::time::timeout(queda, stream.next()).await {
                     Err(_) => return Err(BrainError::Timeout),
                     Ok(None) => break,
-                    Ok(Some(parte)) => match parte.map_err(con_error)? {
-                        StreamDelta::Texto(t) => {
-                            texto.push_str(&t);
-                            self.emitir(opts, BrainEvent::Token(t));
+                    Ok(Some(parte)) => {
+                        ultima_senal = std::time::Instant::now();
+                        match parte.map_err(con_error)? {
+                            StreamDelta::Texto(t) => {
+                                primer_token = primer_token
+                                    .or_else(|| Some(inicio.elapsed().as_millis() as u64));
+                                texto.push_str(&t);
+                                self.emitir(opts, BrainEvent::Token(t));
+                            }
+                            StreamDelta::Razonamiento(t) => {
+                                // El razonamiento sale del mismo decodificador que la
+                                // respuesta: el primer token del turno es el primero que
+                                // llegue de cualquiera de los dos.
+                                primer_token = primer_token
+                                    .or_else(|| Some(inicio.elapsed().as_millis() as u64));
+                                self.emitir(opts, BrainEvent::Reasoning(t));
+                            }
+                            StreamDelta::Final(r) => final_r = Some(r),
                         }
-                        StreamDelta::Razonamiento(t) => self.emitir(opts, BrainEvent::Reasoning(t)),
-                        StreamDelta::Final(r) => final_r = Some(r),
-                    },
+                    }
                 }
             }
             let mut r = final_r.ok_or_else(|| {
@@ -1009,12 +1044,19 @@ impl Brain {
                 r.texto = texto;
             }
             if r.ttft_ms.is_none() {
-                r.ttft_ms = Some(inicio.elapsed().as_millis() as u64);
+                // Tiempo **hasta el primer token**, no duración de la generación:
+                // hasta el 07-10 se ponía aquí `inicio.elapsed()` ya terminado el
+                // bucle, y el número era el tiempo total disfrazado. Un turno sin
+                // letras no tiene primer token: se queda en `None`.
+                r.ttft_ms = primer_token;
             }
             Ok(r)
         } else {
+            // Sin eventos no hay stream al que mirar el pulso, así que aquí el
+            // `timeout_s` del Plan sí es un total: se le suma lo que puede costar
+            // generar lo que el propio Plan autorizó (ver `techo_total`).
             tokio::time::timeout(
-                std::time::Duration::from_secs(plan.timeout_s as u64 + 30),
+                techo_total(plan.timeout_s, autorizado),
                 proveedor.generate(g),
             )
             .await
@@ -1471,4 +1513,79 @@ fn approval_texto(a: ApprovalLevel) -> String {
         ApprovalLevel::FullAccess => "acceso total",
     }
     .to_string()
+}
+
+/// Cuánto puede tardar **en total** una corrida: lo que el Plan autoriza generar
+/// (respuesta más el razonamiento reservado) a una decodificación conservadora, con
+/// el suelo que pone el `timeout_s` de siempre más su margen.
+///
+/// El número deja de ser teórico con el razonamiento encendido, y es lo que se midió
+/// el 07-10 en esta máquina: `qwen3.5:0.8b` decodifica a 14,6–17,4 tok/s y un «hola»
+/// con el razonamiento en `Medio` tardó **79,7 s** en su primera letra, con 1213
+/// deltas de pensamiento por delante. Un Plan de N0 firmaba a la vez 30 s de tope y
+/// 192 + 4096 tokens de salida: las dos cosas no pueden ser verdad, y cortar por las
+/// 30 s dejaba el chat sin respuesta y **sin mensaje guardado**.
+pub(crate) fn techo_total(timeout_s: u32, tokens_autorizados: u32) -> std::time::Duration {
+    /// Tokens por segundo por debajo de los cuales ya no se espera que salga nada en
+    /// una máquina sin GPU. Medido el 07-10: lo más lento fue 14,6 tok/s; se deja
+    /// margen de tres porque el techo no es una apuesta, es lo que el Plan firmó.
+    const TOK_S_MINIMA: u64 = 5;
+    let por_tokens =
+        std::time::Duration::from_secs(u64::from(tokens_autorizados).div_ceil(TOK_S_MINIMA));
+    let suelo = std::time::Duration::from_secs(u64::from(timeout_s.max(1)) + 30);
+    por_tokens.max(suelo)
+}
+
+/// Qué deja esperar el drenado del stream; `None` es cortar por `Timeout`. Van los
+/// dos relojes dentro (`inactividad` = lo que hace desde la última señal; `total` = lo
+/// que lleva la corrida) para que la regla se pueda probar sin red ni modelo.
+pub(crate) fn plazo_del_drenado(
+    inactividad: std::time::Duration,
+    total: std::time::Duration,
+    timeout_s: u32,
+    tokens_autorizados: u32,
+) -> Option<std::time::Duration> {
+    let señal = std::time::Duration::from_secs(u64::from(timeout_s.max(1)));
+    let techo = techo_total(timeout_s, tokens_autorizados);
+    if inactividad >= señal || total >= techo {
+        return None;
+    }
+    Some((señal - inactividad).min(techo - total))
+}
+
+#[cfg(test)]
+mod pruebas_del_drenado {
+    use super::*;
+
+    fn s(n: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(n)
+    }
+
+    /// El caso que rompió el chat el 07-10: N0 con razonamiento `Medio`, 79,7 s hasta
+    /// la primera letra medidos.
+    #[test]
+    fn pensar_no_cabe_en_el_tope_de_treinta_segundos() {
+        let autorizado = 192 + 4096;
+        assert_eq!(techo_total(30, autorizado), s(858));
+        // A los 200 s de corrida, con señal hace nada, se sigue esperando.
+        assert!(plazo_del_drenado(s(0), s(200), 30, autorizado).is_some());
+        // El total de antes (30 + 30 de margen) habría cortado ese turno.
+        assert!(s(200) >= s(60));
+    }
+
+    #[test]
+    fn una_conexion_silenciosa_si_se_corta() {
+        // 31 s sin una sola señal: la conexión está muerta, no el modelo pensando.
+        assert_eq!(plazo_del_drenado(s(31), s(40), 30, 192), None);
+        // 29 s con señal reciente: queda un segundo de espera, no veintinueve.
+        assert_eq!(plazo_del_drenado(s(29), s(40), 30, 192), Some(s(1)));
+    }
+
+    #[test]
+    fn el_suelo_del_techo_no_aprieta_lo_de_siempre() {
+        // Sin razonamiento autorizado, el total sigue siendo el de antes.
+        assert_eq!(techo_total(30, 192), s(60));
+        // Y un N3 con pensamiento alto firma su propio techo, más arriba.
+        assert_eq!(techo_total(300, 2048 + 10240), s(2458));
+    }
 }

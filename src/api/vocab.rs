@@ -66,13 +66,32 @@ impl Level {
         }
     }
 
-    /// `num_ctx` mínimo del nivel. Dentro de {2048, 4096, 8192}; ampliar el
-    /// conjunto es config por modelo (§15.5 del plan), no una constante nueva.
+    /// `num_ctx` que el nivel **pide**. No es una puerta: es el peldaño de la
+    /// escalera a partir del cual el Governor empieza a mirar, y hacia arriba
+    /// gana el más barato que quepa. Dentro de {512 … 8192}; ampliar el conjunto
+    /// es config por modelo (§15.5 del plan), no una constante nueva.
     pub fn num_ctx_minimo(&self) -> u32 {
         match self {
             Level::N0 | Level::N1 => 2048,
             Level::N2 => 4096,
             Level::N3 => 8192,
+        }
+    }
+
+    /// Ventana más pequeña con la que el nivel todavía firma algo útil, y por
+    /// debajo de ella el turno **sí** se cae. Donde `num_ctx_minimo` era suelo
+    /// duro, un saludo en N1 se rechazaba por 114 MB de RAM que un saludo no
+    /// necesita: el Governor descendía a este valor y devolvía `cabe: false`.
+    ///
+    /// Los números no son de capricho: 512 es lo que queda para contexto y salida
+    /// una vez descontado el system de un chat (`SUELO` de `armador.rs` deja 64 +
+    /// 64) y un N2 sin 1024 no puede meter ni el resultado de una tool; un N3 sin
+    /// 2048 no puede razonar y responder a la vez.
+    pub fn num_ctx_suelo(&self) -> u32 {
+        match self {
+            Level::N0 | Level::N1 => 512,
+            Level::N2 => 1024,
+            Level::N3 => 2048,
         }
     }
 
@@ -393,6 +412,23 @@ mod tests {
         assert!(!Level::N1.permite_tools());
         assert_eq!(Level::N0.reintentos(), 0);
         assert_eq!(Level::N3.siguiente(), None);
+    }
+
+    #[test]
+    fn el_suelo_es_menor_que_lo_que_el_nivel_pide() {
+        // Si el suelo igualara al mínimo, el Governor seguiría teniendo una puerta
+        // en vez de una preferencia y el saludo del 05-10 volvería a rechazarse.
+        for n in [Level::N0, Level::N1, Level::N2, Level::N3] {
+            assert!(
+                n.num_ctx_suelo() < n.num_ctx_minimo(),
+                "{n:?}: suelo {} vs pedido {}",
+                n.num_ctx_suelo(),
+                n.num_ctx_minimo()
+            );
+        }
+        assert_eq!(Level::N1.num_ctx_suelo(), 512);
+        assert_eq!(Level::N2.num_ctx_suelo(), 1024);
+        assert_eq!(Level::N3.num_ctx_suelo(), 2048);
     }
 
     #[test]

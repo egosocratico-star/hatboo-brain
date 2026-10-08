@@ -125,7 +125,9 @@ impl Registry {
         self.modelos.iter().find(|m| m.id == id)
     }
 
-    /// Cumple lo que el nivel pide, sin mirar la RAM (eso lo añade el Governor).
+    /// Cumple lo que el nivel puede firmar, sin mirar la RAM (eso lo añade el
+    /// Governor). Se filtra por el SUELO y no por lo que el nivel pide: un modelo
+    /// con 2048 de techo sirve para un N1 apretado, y dejarlo fuera era otra puerta.
     pub fn elegibles(
         &self,
         level: Level,
@@ -141,7 +143,7 @@ impl Registry {
                 ExecutionPolicy::CloudOnly => !m.local,
                 _ => true,
             })
-            .filter(|m| m.max_ctx >= level.num_ctx_minimo())
+            .filter(|m| m.max_ctx >= level.num_ctx_suelo())
             .collect()
     }
 

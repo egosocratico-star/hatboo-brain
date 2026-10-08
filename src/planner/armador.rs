@@ -9,7 +9,7 @@ use super::validation::{validate_plan, PlanContext, PlanViolation};
 use super::SCHEMA_VERSION;
 use crate::api::request::BrainRequest;
 use crate::api::vocab::{
-    ExecutionTarget, KeepAlive, Level, ModelId, Risk, ThinkingLevel, ToolId,
+    ExecutionTarget, Level, ModelId, Risk, ThinkingLevel, ToolId,
 };
 use crate::decision::DecisionResult;
 use crate::models::ModelInfo;
@@ -164,7 +164,13 @@ impl Armador {
 
         // thinking: techo del producto, mínimo del nivel, y lo que el modelo sabe
         // hacer. Si el modelo no razona, se ignora y queda dicho.
-        let thinking = elegir_thinking(e.req, e.decision, e.modelo, e.consejo);
+        // El techo se lee del `PlanContext`, que es donde el runtime ya resolvió
+        // `req.thinking_ceiling.or(config.thinking_ceiling)`. Leer aquí el campo del
+        // pedido en crudo era el bug: Hatboo pone el nivel en la config, el pedido
+        // llega vacío, y el razonamiento se apagaba en todos los niveles —«los niveles
+        // de razonamiento no funcionan», medido el 07-10 con `Medium` en la config y
+        // `thinking: Off` en el plan firmado.
+        let thinking = elegir_thinking(e.ctx.ceiling, e.decision.level);
         let mut razon_ignorado = String::new();
         let thinking = if thinking != ThinkingLevel::Off && !e.modelo.supports_thinking {
             razon_ignorado = format!(" · «{}» no razona: thinking vuelve a off", e.modelo.id);
@@ -172,6 +178,22 @@ impl Armador {
         } else {
             thinking
         };
+        // Que el nivel apaga el razonamiento pedido **se dice**. Hasta el 07-10 se
+        // callaba: con «Medio» elegido en Ajustes, un saludo firmado N0 no pensaba y
+        // la interfaz no explicaba por qué, que es exactamente «los niveles de
+        // razonamiento no funcionan». El N0 sigue sin pensar —reservar 4096 tokens de
+        // pensamiento para un «hola» son minutos en esta máquina, medidos: 79,7 s—,
+        // pero ahora queda escrito en el motivo del turno.
+        if thinking == ThinkingLevel::Off
+            && e.modelo.supports_thinking
+            && e.ctx.ceiling.is_some_and(|t| t != ThinkingLevel::Off)
+        {
+            razon_ignorado = format!(
+                " · razonamiento {} pedido y apagado por el nivel {}",
+                palabra_thinking(e.ctx.ceiling.unwrap_or(ThinkingLevel::Off)),
+                palabra_nivel(nivel)
+            );
+        }
 
         let extra = thinking_extra_tokens(&thinking);
         // Lo que el turno trae y no se puede recortar: el system y lo que preguntó
@@ -207,7 +229,10 @@ impl Armador {
             provider: e.modelo.provider.clone(),
             execution_target: decision_target(e.req, e.decision, e.modelo),
             num_ctx,
-            keep_alive: KeepAlive::PorDefecto,
+            // Cuánto se queda el modelo residente no lo decide el nivel ni el
+            // producto: lo decide el módulo de recursos según el ajuste con el que
+            // salió el consejo (`resources::mantener`).
+            keep_alive: crate::resources::mantener(e.consejo.ajuste, e.consejo.presion),
             thinking,
             max_output_tokens: max_output,
             context_budget_tokens: contexto,
@@ -312,25 +337,39 @@ fn decision_a_contexto(d: &DecisionResult) -> u32 {
     }
 }
 
-/// El techo del producto manda; si el nivel lo apaga, se apaga.
-fn elegir_thinking(
-    req: &BrainRequest,
-    d: &DecisionResult,
-    _m: &ModelInfo,
-    _c: &Consejo,
-) -> ThinkingLevel {
-    if matches!(d.level, Level::N0 | Level::N1) {
+/// El techo del producto manda; el nivel decide cuánto de él. Hasta el 07-10 el N0 y
+/// el N1 lo apagaban del todo y el producto no se enteraba. Ahora: N0 no piensa (es el
+/// nivel que existe para contestar ya), N1 empieza por `Bajo`, y del N2 arriba llega
+/// hasta el techo pedido. Puro y con las dos entradas que miraba de verdad, para que
+/// se pueda probar sin montar un `DecisionResult`.
+fn elegir_thinking(techo: Option<ThinkingLevel>, nivel: Level) -> ThinkingLevel {
+    let Some(techo) = techo.filter(|t| *t != ThinkingLevel::Off) else {
         return ThinkingLevel::Off;
+    };
+    match nivel {
+        Level::N0 => ThinkingLevel::Off,
+        Level::N1 => techo.min(ThinkingLevel::Low),
+        Level::N2 | Level::N3 => techo,
     }
-    let techo = req.thinking_ceiling.unwrap_or(ThinkingLevel::Off);
-    if techo == ThinkingLevel::Off {
-        return ThinkingLevel::Off;
+}
+
+/// Las palabras del producto para el motivo del turno: el `Debug` de los enums
+/// (`N0`, `Medium`) no es lo que se enseña en la nota.
+fn palabra_nivel(n: Level) -> &'static str {
+    match n {
+        Level::N0 => "Instantáneo",
+        Level::N1 => "Normal",
+        Level::N2 => "Enfocado",
+        Level::N3 => "Profundo",
     }
-    // N2: off o low. N3: lo que pida el producto, sin pasar de su techo.
-    match d.level {
-        Level::N2 => techo.min(ThinkingLevel::Low),
-        Level::N3 => techo,
-        _ => ThinkingLevel::Off,
+}
+
+fn palabra_thinking(t: ThinkingLevel) -> &'static str {
+    match t {
+        ThinkingLevel::Off => "apagado",
+        ThinkingLevel::Low => "bajo",
+        ThinkingLevel::Medium => "medio",
+        ThinkingLevel::High => "alto",
     }
 }
 
@@ -490,6 +529,7 @@ mod tests {
             presion: false,
             margen_mb: 1500,
             cargados: vec![],
+            ajuste: crate::resources::Ajuste::Ninguno,
             porque: "el único que hay".into(),
         }
     }
@@ -501,7 +541,7 @@ mod tests {
         PlanContext {
             tools_del_producto: tools,
             modelos,
-            ctx_permitidos: &[2048, 4096, 8192],
+            ctx_permitidos: &[512, 1024, 2048, 4096, 8192],
             ..Default::default()
         }
     }
@@ -606,5 +646,27 @@ mod tests {
             "{}",
             pie.plan.reason
         );
+    }
+
+    /// El reproche del 07-10: «lo de los niveles de razonamiento no funciona». No
+    /// funcionaba: con `Medio` pedido, el N0 **y el N1** lo apagaban y el producto no
+    /// se enteraba. La regla nueva, fijada aquí sin montar un `DecisionResult`.
+    #[test]
+    fn el_techo_del_producto_llega_al_plan_desde_el_n1() {
+        use ThinkingLevel::{High, Low, Medium, Off};
+        // Sin techo pedido, nada piensa, en cualquier nivel.
+        for n in [Level::N0, Level::N1, Level::N2, Level::N3] {
+            assert_eq!(elegir_thinking(None, n), Off, "{n:?}");
+            assert_eq!(elegir_thinking(Some(Off), n), Off, "{n:?}");
+        }
+        // El N0 es el nivel que existe para contestar ya: sigue sin pensar.
+        assert_eq!(elegir_thinking(Some(Medium), Level::N0), Off);
+        // Del N1 arriba se honra el techo, con el freno de `Bajo` en el N1.
+        assert_eq!(elegir_thinking(Some(High), Level::N1), Low);
+        assert_eq!(elegir_thinking(Some(Medium), Level::N1), Low);
+        assert_eq!(elegir_thinking(Some(Low), Level::N1), Low);
+        assert_eq!(elegir_thinking(Some(Medium), Level::N2), Medium);
+        assert_eq!(elegir_thinking(Some(High), Level::N2), High);
+        assert_eq!(elegir_thinking(Some(High), Level::N3), High);
     }
 }

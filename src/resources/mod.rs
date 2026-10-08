@@ -4,7 +4,7 @@
 
 pub mod governor;
 
-pub use governor::{Consejo, Governor, GovernorConfig};
+pub use governor::{mantener, Ajuste, Consejo, Governor, GovernorConfig};
 
 use crate::models::ModeloCargado;
 

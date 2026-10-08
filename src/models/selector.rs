@@ -66,11 +66,11 @@ fn no_cumple(m: &ModelInfo, d: &DecisionResult, policy: ExecutionPolicy) -> Vec<
     if m.kind != ModelKind::Generativo {
         v.push("es un modelo de decisión: no responde al usuario".to_string());
     }
-    if m.max_ctx < d.level.num_ctx_minimo() {
+    if m.max_ctx < d.level.num_ctx_suelo() {
         v.push(format!(
-            "su contexto máximo ({}) no llega a los {} que exige {:?}",
+            "su contexto máximo ({}) no llega a los {} con los que {:?} puede firmar algo",
             m.max_ctx,
-            d.level.num_ctx_minimo(),
+            d.level.num_ctx_suelo(),
             d.level
         ));
     }
@@ -180,7 +180,11 @@ pub fn elegir(
         if consejo.cabe {
             let pedido = req.preferred_model.as_deref() == Some(m.id.as_str());
             let porque = if pedido {
-                format!("«{}» es el que elegiste y cabe: {}", m.id, consejo.porque)
+                // El nombre del modelo y la cuenta de si cabe ya van en `consejo.porque`
+                // (lo redacta el Governor). Aquí no se repite ninguno de los dos:
+                // ««q» es el que elegiste y cabe: «q» cabe a 2048…» se leyó en la nota
+                // de un chat el 07-10, y era la misma palabra dos veces.
+                format!("Elegiste tú este modelo: {}", consejo.porque)
             } else if let Some(pref) = &req.preferred_model {
                 format!(
                     "«{pref}» no cabe ahora; sigue «{}» ({})",
@@ -210,24 +214,21 @@ pub fn elegir(
         }
     }
 
-    // Nada cabe: si la policy es `local_only` NO se cae a una API (§15.2 del plan).
-    // La cifra que se dice lleva dentro el margen del Governor, que es lo que de
-    // verdad hizo falta: decir solo los MB del modelo produce un «hacen falta 878
-    // y quedan 1128» que parece un error de aritmética.
-    let (needed_mb, free_mb) = match mas_barato {
-        Some((ram, c)) => (
+    // Con el Governor de hoy aquí solo se llega sin datos: sonda ciega, modelo sin
+    // medir, o un techo de contexto por debajo del suelo del nivel. Las cifras del
+    // descarte que menos pedía se dan si existen —la más alta asustaría sin causa,
+    // y un `0 MB` sería inventar—; sin ninguna, el error es `NoEligibleModel`, que
+    // es lo que pasó: no es que no quepa, es que no lo sabemos.
+    match mas_barato {
+        Some((ram, c)) => Err(BrainError::ResourceExhausted {
             // El margen del consejo, no `config.margen_mb`: es el que estrecha el
             // Governor cuando conoce el total, y la suma que se le enseña al
-            // usuario tiene que ser la que produjo el rechazo.
-            (ram + c.margen_mb) as u32,
-            c.libre_mb.unwrap_or(0) as u32,
-        ),
-        _ => (0, 0),
-    };
-    Err(BrainError::ResourceExhausted {
-        needed_mb,
-        free_mb,
-    })
+            // usuario tiene que ser la que produjo el descarte.
+            needed_mb: (ram + c.margen_mb) as u32,
+            free_mb: c.libre_mb.unwrap_or(0) as u32,
+        }),
+        None => Err(BrainError::NoEligibleModel),
+    }
 }
 
 /// Si el modelo pedido no está ni en el registry: error tipado con mensaje
@@ -325,11 +326,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(e.modelo.id, "medio:4b");
-        assert!(e.porque.contains("el que elegiste"), "{}", e.porque);
+        assert!(e.porque.contains("Elegiste tú este modelo"), "{}", e.porque);
+        // Ni el nombre ni el verbo dos veces: la cuenta la redacta el Governor una
+        // sola vez (««medio:4b» cabe a 2048: …») y el Selector no la repite. Era
+        // ««q» es el que elegiste y cabe: «q» cabe a 2048…», leído en la nota de un
+        // chat el 07-10.
+        assert_eq!(e.porque.matches("medio:4b").count(), 1, "{}", e.porque);
+        assert_eq!(e.porque.matches("cabe").count(), 1, "{}", e.porque);
     }
 
     #[test]
-    fn si_no_cabe_baja_al_siguiente_y_explica_el_desvio() {
+    fn si_no_cabe_con_margen_se_corre_el_pedido_apurado() {
         let r = reg();
         let req = BrainRequest::nuevo("hatboo", "work", "arregla x")
             .con_modelo("grande:9b");
@@ -346,9 +353,12 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_ne!(e.modelo.id, "grande:9b");
-        assert!(e.porque.contains("no cabe"), "{}", e.porque);
-        assert!(e.descartados.iter().any(|(id, _)| id == "grande:9b"));
+        // Antes esto devolvía `medio:4b` con un «no cabe» en el motivo: el Governor
+        // usaba la RAM como puerta y el usuario se iba a otro modelo sin pedirlo.
+        // Hoy el que eligió se corre con la ventana apretada y el desvío no existe.
+        assert_eq!(e.modelo.id, "grande:9b", "{}", e.porque);
+        assert_eq!(e.consejo.ajuste, crate::resources::Ajuste::SinMargen);
+        assert!(e.descartados.is_empty(), "{:?}", e.descartados);
     }
 
     #[test]
@@ -378,7 +388,9 @@ mod tests {
         let r = reg();
         let req = BrainRequest::nuevo("hatboo", "work", "usa tools")
             .con_policy(ExecutionPolicy::LocalOnly);
-        // RAM justa: solo cabrían los locales pequeños, que no tienen tools.
+        // RAM justa: solo cabrían los locales pequeños, que no tienen tools. La
+        // policy sigue ganando: se corre el local apurando la ventana, y la nube
+        // ni se nombra.
         let sonda = SondaFija {
             libre: Some(1200),
             ..Default::default()
@@ -390,10 +402,11 @@ mod tests {
             &gov(),
             &sonda,
             false,
-        );
-        let err = e.unwrap_err();
-        assert!(matches!(err, BrainError::ResourceExhausted { .. }), "{err:?}");
-        assert!(!format!("{err:?}").contains("nube"), "local_only no propone la nube");
+        )
+        .unwrap();
+        assert!(e.modelo.local, "{:?}", e.modelo.id);
+        assert_eq!(e.consejo.ajuste, crate::resources::Ajuste::SinMargen);
+        assert!(!format!("{e:?}").contains("nube"), "local_only no propone la nube");
     }
 
     #[test]
@@ -414,24 +427,20 @@ mod tests {
     }
 
     #[test]
-    fn nada_cabe_y_dan_las_cifras() {
+    fn la_maquina_sin_sitio_se_corre_igual_y_dice_las_cifras() {
         let r = reg();
         let req = BrainRequest::nuevo("hatboo", "chat", "hola").con_modelo("nano:0.8b");
         let sonda = SondaFija {
             libre: Some(300),
             ..Default::default()
         };
-        let err = elegir(&req, &decision(Level::N0, vec![]), &r, &gov(), &sonda, false)
-            .unwrap_err();
-        match err {
-            BrainError::ResourceExhausted { needed_mb, free_mb } => {
-                // 900 del modelo + 1500 del margen que exige el Governor: las dos
-                // cifras tienen que sumar, si no el aviso parece un error.
-                assert_eq!(needed_mb, 2400);
-                assert_eq!(free_mb, 300);
-            }
-            otro => panic!("{otro:?}"),
-        }
-        assert!(err.recuperable());
+        let e = elegir(&req, &decision(Level::N0, vec![]), &r, &gov(), &sonda, false).unwrap();
+        // 300 MB libres para un modelo de 900 + 1500 de margen: ni apretando la
+        // ventana hay forma de cuadrar la cuenta, y aun así el usuario recibe su
+        // respuesta (o el error de Ollama al cargar, que es la verdad del momento).
+        assert_eq!(e.consejo.ajuste, crate::resources::Ajuste::SinMargen);
+        assert_eq!(e.consejo.num_ctx, 512);
+        let p = &e.consejo.porque;
+        assert!(p.contains("900") && p.contains("300") && p.contains("margen 1500"), "{p}");
     }
 }

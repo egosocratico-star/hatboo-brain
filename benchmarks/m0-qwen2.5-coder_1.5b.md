@@ -24,3 +24,34 @@ Comparado sobre 23 entradas (las que generaron en los dos bandos). Fuera: 1 gene
 **Veredicto qwen2.5-coder:1.5b**: REGRESIÓN — 0 métricas por debajo del umbral y 2 por encima, sobre 23 entradas comparables.
 
 **Veredicto**: REGRESIÓN en 2 métricas de coste por respuesta (0 por debajo del umbral), sobre 3 repeticiones compartidas. Ver arriba el veredicto de cada modelo: los dos no dicen lo mismo.
+
+## Después del gate (05-10): qué hizo la recta abierta aquí
+
+No forma parte del gate M0 y **no se compara con él**: son otras condiciones de RAM y
+otra construcción. Queda escrito porque este informe cerró con dos gastos que el
+mismo día se atacaron —24 recargas y 32 rechazos por falta de RAM convertidos en
+«-99,9 % de duración»—, y alguien va a preguntar si se arreglaron.
+
+Decisión 26 del `docs/decision-log.md`: la RAM dejó de ser una puerta. La escalera
+bajó a cinco peldaños con los dos nuevos medidos (`hatboo/benchmarks/resultados/rama-2026-10-06.json`), y el Governor aprieta la ventana o gasta el margen en vez de
+negar el turno. La escalera entera, con histéresis: con el modelo residente a una
+ventana que cumple el nivel no se le mueve, que es lo que producía las recargas.
+
+Pase corto sobre este mismo modelo, `--modo brain --reps 2 --categoria saludo
+--margen 250` (volcado en `benchmarks/volcados/post-coder-saludo.json`):
+
+```text
+  RAM libre medida        1936 MB
+  corridas                8 · las 8 generaron (0 rechazos)
+  latencia total          1237 ms  [776–1704]
+  tokens de salida        17  [11–24]
+  RAM residente           1109 MB en las 8
+  reintentos                  0
+  recargas                    1   (la carga fría; las otras 7 fueron residentes)
+  precisión de nivel       8/8
+```
+
+Lo que se puede decir con esto: **ocho turnos de saludo seguidos, una sola carga**.
+Lo que no: no es una comparación con las 72 corridas de arriba —otro RAM libre, otra
+categoría y dos repeticiones en vez de tres—, así que aquí no hay porcentajes. El
+mismo `--comparar` con dos volcados al mismo nivel dirá el delta cuando se corra.

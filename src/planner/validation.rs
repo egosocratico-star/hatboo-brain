@@ -81,7 +81,10 @@ pub struct PlanContext<'a> {
 
 impl<'a> Default for PlanContext<'a> {
     fn default() -> Self {
-        static CTX: [u32; 3] = [2048, 4096, 8192];
+        // El mismo conjunto que `GovernorConfig::default()`: si el default de un
+        // tests quedara por detrás, un Plan con ventana corta sería inválido aquí y
+        // válido en producción, que es la peor combinación.
+        static CTX: [u32; 5] = [512, 1024, 2048, 4096, 8192];
         PlanContext {
             approval: ApprovalLevel::AskAlways,
             policy: ExecutionPolicy::LocalPreferred,

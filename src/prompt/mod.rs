@@ -9,7 +9,7 @@ pub mod system;
 
 pub use dynamic::{presupuesto_efectivo, texto_del_turno, ContextoArmado};
 pub use escape::{bloque_datos, sanea_origen};
-pub use system::{build_system, Identidad, Capa};
+pub use system::{build_system, instruccion_del_intent, Identidad, Capa};
 
 /// Contador de tokens. El crate **no** trae tokenizador: una estimación honesta
 /// por defecto, y el producto enchufa el suyo si lo tiene.

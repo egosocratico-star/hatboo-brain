@@ -245,7 +245,7 @@ mod tests {
     fn las_partes_se_pueden_escribir_sueltas() {
         let c: GovernorConfig = serde_json::from_str(r#"{"margenMb": 2048}"#).unwrap();
         assert_eq!(c.margen_mb, 2048);
-        assert_eq!(c.ctx_permitidos, vec![2048, 4096, 8192]);
+        assert_eq!(c.ctx_permitidos, vec![512, 1024, 2048, 4096, 8192]);
     }
 
     #[test]

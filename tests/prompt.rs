@@ -4,7 +4,9 @@
 use hatboo_brain::api::vocab::{ExecutionTarget, Intent, Level, OutputContract, VerificationMode};
 use hatboo_brain::planner::Plan;
 use hatboo_brain::prompt::escape::{bloque_datos, dentro, intenta_romper, sanea_origen};
-use hatboo_brain::prompt::system::{build_system, capas, hash_prefijo, Identidad};
+use hatboo_brain::prompt::system::{
+    build_system, capas, hash_prefijo, instruccion_del_intent, Identidad,
+};
 use hatboo_brain::prompt::{presupuesto_efectivo, texto_del_turno, ContextoArmado};
 
 fn sys(herramientas: &[String], idioma: &str) -> String {
@@ -25,6 +27,56 @@ fn el_mismo_estado_produce_los_mismos_bytes() {
     assert_eq!(hash_prefijo(&a).len(), 16);
     // Cambiar el idioma pedido cambia el contrato, y eso se nota en el hash.
     assert_ne!(hash_prefijo(&a), hash_prefijo(&sys(&t, "en")));
+}
+
+#[test]
+fn un_turno_sin_tools_no_le_habla_de_herramientas_ni_de_archivos() {
+    // El 07-10 se leyó en el chat, literal: «…no una herramienta automotriz y no tengo
+    // herramientas que aprobar ni permiso necesario en este turno; mi función es
+    // responder directamente a tus peticiones en español sin inventar rutas o
+    // comandos». Cada trozo estaba en el system. Un modelo de 0,8 B no razona sobre
+    // lo que lee: lo repite, así que la regla es que no haya nada que repetir.
+    let con_tools = sys(&tools(), "es");
+    let sin_tools = sys(&[], "es");
+    assert!(con_tools.contains("solo puedes usar las herramientas listadas"));
+    assert!(sin_tools.len() < con_tools.len(), "el chat es más corto, no más largo");
+    let minus = sin_tools.to_lowercase();
+    for palabra in ["herramienta", "permiso", "ejecut", "archivo", "plan firmado"] {
+        assert!(
+            !minus.contains(palabra),
+            "el system de un chat sin tools nombra «{palabra}»: {sin_tools}"
+        );
+    }
+    // La defensa contra la inyección no habla de capacidades: esa se queda.
+    assert!(sin_tools.contains("<datos origen="), "{sin_tools}");
+    assert!(sin_tools.contains("Contesta lo que preguntó el usuario"), "{sin_tools}");
+}
+
+#[test]
+fn el_intent_se_nota_en_la_capa_de_modo() {
+    let capa_modo = |i: Intent| {
+        capas(
+            &Identidad::default(),
+            "chat",
+            &[],
+            None,
+            None,
+            Some(instruccion_del_intent(i)),
+            "es",
+        )
+        .into_iter()
+        .find(|c| c.nombre == "modo")
+        .expect("capa de modo")
+        .texto
+        .clone()
+    };
+    let preguntar = capa_modo(Intent::Ask);
+    assert!(preguntar.starts_with("Modo: chat."), "{preguntar}");
+    assert!(preguntar.contains("Turno: una pregunta."), "{preguntar}");
+    // Dos intents distintos, dos system distintos: es justo lo que él pedía
+    // («para todo el mismo prompt»).
+    assert_ne!(preguntar, capa_modo(Intent::Verify));
+    assert_ne!(preguntar, capa_modo(Intent::Modify));
 }
 
 #[test]

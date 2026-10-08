@@ -119,7 +119,7 @@ fn las_piezas_del_pedido_ponen_el_archivo_nombreado_alto() {
         trust_state: Default::default(),
         verify: Default::default(),
     });
-    let v = hatboo_brain::context::sources::piezas_del_pedido(&req, None, Some("src/main.rs"));
+    let v = hatboo_brain::context::sources::piezas_del_pedido(&req, None, Some("src/main.rs"), true);
     assert!(!v.is_empty());
     // El orden ya viene priorizado: lo primero que sale es lo más importante.
     let primera = &v[0];
@@ -138,7 +138,7 @@ fn las_piezas_del_pedido_ponen_el_archivo_nombreado_alto() {
 #[test]
 fn sin_fuentes_el_pedido_no_se_queda_sin_contexto_de_seguridad() {
     let req = BrainRequest::nuevo("hatboo", "work", "hola");
-    let seg = hatboo_brain::context::sources::piezas_de_seguridad(&req, "approve_for_me");
+    let seg = hatboo_brain::context::sources::piezas_de_seguridad(&req, "approve_for_me", true);
     assert!(
         seg.iter().any(|p| p.prioridad == Prioridad::Seguridad),
         "el approval activo tiene que estar en el prompt, siempre"

@@ -1227,6 +1227,10 @@ fn bateria_decisiones(entradas: &[&Entrada], config: &Cargada, opts: &Opciones) 
     let mut atajo = 0usize;
     let mut microses: Vec<u64> = Vec::new();
     let mut franjas: BTreeMap<&'static str, usize> = BTreeMap::new();
+    // G.1 paso 1: cuántas reglas casan por entrada, y qué valor de confianza da
+    // cada caso. El 4 es el cubo «cuatro o más».
+    let mut coincidentes: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut valores_confianza: BTreeMap<String, usize> = BTreeMap::new();
 
     for &e in entradas {
         // El fixture se lee de su carpeta original: la decisión solo mira si hay
@@ -1240,6 +1244,24 @@ fn bateria_decisiones(entradas: &[&Entrada], config: &Cargada, opts: &Opciones) 
         let t0 = Instant::now();
         let d = motor.evaluar(&req);
         microses.push(t0.elapsed().as_micros() as u64);
+
+        // G.1 paso 1, medido con las mismas piezas públicas que usa `evaluar` y por
+        // fuera del Motor: la confianza sale del margen entre la primera y la
+        // segunda candidatura (`prio × 100 + condiciones`), así que lo que hay que
+        // saber es cuántas reglas casaron —no si la decisión fue buena—.
+        let sen = hatboo_brain::decision::engine::senales(&req, &config.reglas);
+        let casan = config
+            .reglas
+            .reglas
+            .iter()
+            .filter(|r| config.reglas.cumple(r, &sen, &sen.language).unwrap_or(false))
+            .count();
+        if d.source != hatboo_brain::api::vocab::DecisionSource::FastPath {
+            *coincidentes.entry(casan.min(4)).or_default() += 1;
+            *valores_confianza
+                .entry(format!("{:.3}", d.confidence.valor()))
+                .or_default() += 1;
+        }
 
         if d.source == hatboo_brain::api::vocab::DecisionSource::FastPath {
             atajo += 1;
@@ -1333,6 +1355,25 @@ fn bateria_decisiones(entradas: &[&Entrada], config: &Cargada, opts: &Opciones) 
     println!("  riesgos: {:?}", riesgos);
     println!("  contratos: {:?}", contratos);
     println!("  confianza: {:?}", franjas);
+    // G.1 paso 1: el desglose que falta para poder opinar de la fórmula. Si el 1,000
+    // sale de «casó una sola regla», la franja alta no es certeza: es soledad.
+    let cubos: Vec<String> = coincidentes
+        .iter()
+        .map(|(n, c)| {
+            if *n == 4 {
+                format!("≥4 → {c}")
+            } else {
+                format!("{n} → {c}")
+            }
+        })
+        .collect();
+    println!("  reglas que casan (sin Fast Path): {}", cubos.join(" · "));
+    let hist: Vec<String> = valores_confianza
+        .iter()
+        .rev()
+        .map(|(v, c)| format!("{v}×{c}"))
+        .collect();
+    println!("  valores de confianza: {}", hist.join("  "));
     // Cuánto contexto y salida firma cada lote: es el coste que el Engine está
     // asignando antes de que nadie escriba una línea. Se leen las mismas funciones
     // con las que se firma el Plan, no una copia a mano.
@@ -1476,17 +1517,31 @@ async fn sondeo(ollama: &Arc<OllamaProvider>, registry: &Registry) {
             info.disco_mb,
             info.max_ctx
         );
+        // Los cinco peldaños de la escalera del Governor. Los dos bajos son los que
+        // le permiten apretar la ventana en vez de negar el turno, y `ram_para` no
+        // interpola: si no se miden aquí, no existen.
         let escalones: Vec<u32> = if info.max_ctx >= 8192 {
-            vec![2048, 4096, 8192]
+            vec![512, 1024, 2048, 4096, 8192]
         } else if info.max_ctx >= 4096 {
-            vec![2048, 4096]
+            vec![512, 1024, 2048, 4096]
         } else {
-            vec![2048]
+            vec![512, 1024, 2048]
         };
         for ctx in escalones {
             let _ = ollama.expulsar(&info.id).await;
             if let Some(libre) = sonda.libre_mb() {
-                let necesita = *info.ram_mb_by_ctx.values().max().unwrap_or(&0);
+                // Lo que hace falta para intentar ESTE peldaño: la cifra medida del
+                // vecino de abajo, si lo hay. Con `max` de toda la tabla, un 512 no
+                // se intentaba en una máquina que no llegaba al 8192 —y el peldaño
+                // bajo es justamente el que hay que poder medir—.
+                let necesita = info
+                    .ram_mb_by_ctx
+                    .iter()
+                    .filter(|(c, _)| **c <= ctx)
+                    .map(|(_, r)| *r)
+                    .max()
+                    .or_else(|| info.ram_mb_by_ctx.values().min().copied())
+                    .unwrap_or(0);
                 if necesita > 0 && libre < necesita + 800 {
                     println!("  ctx {ctx:>5} · no se intenta: {libre} MB libres para ~{necesita} MB");
                     continue;

@@ -13,7 +13,7 @@ use super::{
 use crate::api::vocab::{KeepAlive, ThinkingLevel, ToolId};
 use crate::models::{ModelInfo, ModelKind, ModeloCargado};
 use async_trait::async_trait;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -101,12 +101,15 @@ impl OllamaProvider {
             KeepAlive::Expulsar => cuerpo["keep_alive"] = serde_json::json!(0),
         }
 
-        // `think`: Ollama admite un booleano; en versiones recientes también
-        // niveles, pero no se asume: se manda el booleano y el sondeo (§X) dice si
-        // salió razonamiento de verdad.
-        if req.thinking != ThinkingLevel::Off {
-            cuerpo["think"] = serde_json::json!(true);
-        }
+        // `think`: se manda **siempre**, con su booleano. Omitir la clave cuando el
+        // nivel es `Off` no significaba «no pienses»: significaba «que decida el
+        // servidor», y los modelos que nacen pensando deciden pensar. Medido el 07-10
+        // en esta máquina con `qwen3.5:0.8b`: callado el campo, los 160 tokens de
+        // `num_predict` se fueron en `thinking` y la respuesta visible salió **vacía**
+        // y truncada; con `think: false` el mismo pedido contesta en 3090 ms. Y no
+        // rompe a los que no piensan: `gemma3:1b` y `deepseek-r1:1.5b` aceptan el
+        // booleano y responden igual.
+        cuerpo["think"] = serde_json::json!(req.thinking != ThinkingLevel::Off);
 
         // El contrato `Json` se le dice al servidor, no se le pide al prompt.
         // Medido el 03-10: sin esta línea `gemma3:1b` contestaba ```json …```
@@ -281,37 +284,102 @@ fn arguimentos_de(tc: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-async fn leer_ndjson(
-    resp: reqwest::Response,
-) -> Result<Vec<serde_json::Value>, ProviderError> {
-    use futures_util::StreamExt;
-    let mut stream = resp.bytes_stream();
-    let mut colchon = String::new();
-    let mut out = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| ProviderError::Transporte(e.to_string()))?;
-        colchon.push_str(&String::from_utf8_lossy(&bytes));
-        while let Some(i) = colchon.find('\n') {
-            let linea = colchon[..i].trim().to_string();
-            colchon.drain(..=i);
+/// La lectura del NDJSON **mientras llega**: cada línea que se cierra se convierte
+/// en su delta y se suelta, sin esperar al final del cuerpo.
+///
+/// Ollama manda un token por línea. Hasta el 07-10 el cuerpo entero se acumulaba
+/// (`leer_ndjson`) y se reenviaba ya terminado, así que una respuesta de 300 tokens
+/// llegaba a la interfaz de golpe, en un solo bulto. Las cuentas del `Final` siguen
+/// saliendo de `juntar` con **todas** las líneas: lo que cambia es *cuándo* se
+/// emiten las letras, no lo que se deja de contar.
+struct Transmision {
+    /// Lo que llegó del proveedor y todavía no cierra un `\n`.
+    colchon: String,
+    /// Deltas ya parseados que faltan emitir.
+    pendientes: VecDeque<StreamDelta>,
+    /// Todas las líneas, para `juntar` al cerrar.
+    lineas: Vec<serde_json::Value>,
+    /// El modelo pedido: si el servidor no lo nombra en ninguna línea, el `Final`
+    /// no puede devolver un id vacío.
+    esperado: String,
+    /// El cuerpo se acabó (o rompió): ya no se lee nada más.
+    cerrado: bool,
+}
+
+impl Transmision {
+    fn nueva(esperado: String) -> Transmision {
+        Transmision {
+            colchon: String::new(),
+            pendientes: VecDeque::new(),
+            lineas: Vec::new(),
+            esperado,
+            cerrado: false,
+        }
+    }
+
+    /// Una línea suelta: se guarda para las cuentas y se encola lo que haya que
+    /// mostrar.
+    fn linea(&mut self, texto: &str) -> Result<(), ProviderError> {
+        let v: serde_json::Value = serde_json::from_str(texto)
+            .map_err(|e| ProviderError::RespuestaInvalida(format!("{e}: {texto}")))?;
+        if let Some(msg) = v.get("message") {
+            if let Some(c) = msg.get("content").and_then(|c| c.as_str()) {
+                if !c.is_empty() {
+                    self.pendientes.push_back(StreamDelta::Texto(c.to_string()));
+                }
+            }
+            // Medido el 07-10 contra el Ollama de esta máquina: `qwen3.5:0.8b` manda
+            // el razonamiento en `message.thinking`, y `reasoning` no aparece nunca.
+            // Sin este espejo del `juntar` de abajo, un turno que piensa no emitía **ni
+            // un delta**: la pantalla se quedaba en blanco hasta el final, y si el tope
+            // de tokens caía dentro del pensamiento, la respuesta salía vacía.
+            if let Some(rc) = msg
+                .get("reasoning")
+                .or_else(|| msg.get("thinking"))
+                .and_then(|c| c.as_str())
+            {
+                if !rc.is_empty() {
+                    self.pendientes.push_back(StreamDelta::Razonamiento(rc.to_string()));
+                }
+            }
+        }
+        self.lineas.push(v);
+        Ok(())
+    }
+
+    /// Bytes recién llegados: se cortan por `\n` y cada parte completa queda lista
+    /// para emitir. Lo incompleto se queda en el colchón.
+    fn recibir(&mut self, nuevos: &str) -> Result<(), ProviderError> {
+        self.colchon.push_str(nuevos);
+        while let Some(i) = self.colchon.find('\n') {
+            let linea = self.colchon[..i].trim().to_string();
+            self.colchon.drain(..=i);
             if linea.is_empty() {
                 continue;
             }
-            let v: serde_json::Value = serde_json::from_str(&linea)
-                .map_err(|e| ProviderError::RespuestaInvalida(format!("{e}: {linea}")))?;
-            out.push(v);
+            self.linea(&linea)?;
         }
+        Ok(())
     }
-    let resto = colchon.trim();
-    if !resto.is_empty() {
-        let v = serde_json::from_str(resto)
-            .map_err(|e| ProviderError::RespuestaInvalida(format!("{e}")))?;
-        out.push(v);
+
+    /// Se acabó el cuerpo. La última línea llega **sin** salto (`done: true`), así
+    /// que el resto del colchón también es línea; después van las cuentas medidas.
+    fn rematar(&mut self) -> Result<(), ProviderError> {
+        let resto = self.colchon.trim().to_string();
+        self.colchon.clear();
+        if !resto.is_empty() {
+            self.linea(&resto)?;
+        }
+        if self.lineas.is_empty() {
+            return Err(ProviderError::RespuestaInvalida("respuesta vacía".into()));
+        }
+        let mut final_r = OllamaProvider::juntar(&self.lineas);
+        if final_r.modelo.is_empty() {
+            final_r.modelo = self.esperado.clone();
+        }
+        self.pendientes.push_back(StreamDelta::Final(final_r));
+        Ok(())
     }
-    if out.is_empty() {
-        return Err(ProviderError::RespuestaInvalida("respuesta vacía".into()));
-    }
-    Ok(out)
 }
 
 #[async_trait]
@@ -340,7 +408,12 @@ impl ModelProvider for OllamaProvider {
             .json()
             .await
             .map_err(|e| ProviderError::RespuestaInvalida(e.to_string()))?;
-        let mut out = Vec::new();
+        // Primero las entradas de `/api/tags`, y **después** todas las fichas a la
+        // vez. Pedirlas de una en una costaba 3028 ms con los once modelos del
+        // equipo (medido el 06-10: 306 ms en paralelo), y este listado se reconstruye
+        // en cada turno del chat: era el coste que él llamaba «el brain continúa
+        // después de que cargue el modelo».
+        let mut bases: Vec<(String, Option<u64>, Option<f64>)> = Vec::new();
         for m in j.get("models").and_then(|v| v.as_array()).into_iter().flatten() {
             let Some(nombre) = m.get("name").and_then(|v| v.as_str()) else {
                 continue;
@@ -351,15 +424,21 @@ impl ModelProvider for OllamaProvider {
                 .and_then(|d| d.get("parameter_size"))
                 .and_then(|v| v.as_str())
                 .and_then(parse_parametros);
-            let (capacidades, ctx_max, modelfile) = self.ficha(nombre).await;
+            bases.push((nombre.to_string(), disco_mb, params));
+        }
+        let fichas = futures_util::future::join_all(bases.iter().map(|(n, _, _)| self.ficha(n))).await;
+        let mut out = Vec::new();
+        for ((nombre, disco_mb, params), (capacidades, ctx_max, _modelfile)) in
+            bases.into_iter().zip(fichas)
+        {
             out.push(ModelInfo {
-                id: nombre.into(),
+                id: nombre.clone(),
                 provider: "ollama".into(),
                 // Un `:cloud` de Ollama se ejecuta fuera del equipo: no es local.
-                local: !es_nube(nombre) && disco_mb.unwrap_or(0) > 0,
+                local: !es_nube(&nombre) && disco_mb.unwrap_or(0) > 0,
                 kind: ModelKind::Generativo,
                 profile: ModelInfo::perfil_desde_parametros(params),
-                tier: tier_desde(params, es_nube(nombre)),
+                tier: tier_desde(params, es_nube(&nombre)),
                 // RAM **no** medida aquí: la mide el barrido de Fase 0.
                 ram_mb_by_ctx: BTreeMap::new(),
                 max_ctx: ctx_max.unwrap_or(8192),
@@ -374,7 +453,6 @@ impl ModelProvider for OllamaProvider {
                     .any(|c| c == "structured_output" || c == "structured_outputs"),
                 disco_mb,
             });
-            let _ = modelfile;
         }
         Ok(out)
     }
@@ -412,35 +490,44 @@ impl ModelProvider for OllamaProvider {
                 cuerpo: texto,
             });
         }
-        let lineas = leer_ndjson(resp).await?;
-        let esperado = req.model.clone();
-        let mut partes: Vec<Result<StreamDelta, ProviderError>> = Vec::new();
-        for l in &lineas {
-            if let Some(c) = l
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_str())
-            {
-                if !c.is_empty() {
-                    partes.push(Ok(StreamDelta::Texto(c.to_string())));
+        // La lectura va delta a delta: una línea cerrada del NDJSON es una letra que
+        // el usuario puede ver ya. Esperar al cuerpo entero era lo que hacía que la
+        // respuesta apareciera de golpe.
+        let trans = Transmision::nueva(req.model.clone());
+        let bytes = resp.bytes_stream();
+        Ok(Box::pin(futures_util::stream::unfold(
+            (trans, bytes),
+            |(mut trans, mut bytes)| async move {
+                use futures_util::StreamExt;
+                loop {
+                    if let Some(delta) = trans.pendientes.pop_front() {
+                        return Some((Ok(delta), (trans, bytes)));
+                    }
+                    if trans.cerrado {
+                        return None;
+                    }
+                    match bytes.next().await {
+                        Some(Ok(chunk)) => {
+                            if let Err(e) = trans.recibir(&String::from_utf8_lossy(&chunk)) {
+                                trans.cerrado = true;
+                                return Some((Err(e), (trans, bytes)));
+                            }
+                        }
+                        Some(Err(e)) => {
+                            trans.cerrado = true;
+                            return Some((Err(ProviderError::Transporte(e.to_string())), (trans, bytes)));
+                        }
+                        None => {
+                            let resto = trans.rematar();
+                            trans.cerrado = true;
+                            if let Err(e) = resto {
+                                return Some((Err(e), (trans, bytes)));
+                            }
+                        }
+                    }
                 }
-            }
-            if let Some(rc) = l
-                .get("message")
-                .and_then(|m| m.get("reasoning"))
-                .and_then(|c| c.as_str())
-            {
-                if !rc.is_empty() {
-                    partes.push(Ok(StreamDelta::Razonamiento(rc.to_string())));
-                }
-            }
-        }
-        let mut final_r = OllamaProvider::juntar(&lineas);
-        if final_r.modelo.is_empty() {
-            final_r.modelo = esperado;
-        }
-        partes.push(Ok(StreamDelta::Final(final_r)));
-        Ok(Box::pin(futures_util::stream::iter(partes)))
+            },
+        )))
     }
 
     async fn cargados(&self) -> Result<Vec<ModeloCargado>, ProviderError> {
@@ -675,7 +762,10 @@ mod tests {
         assert_eq!(c["messages"].as_array().unwrap().len(), 4);
         assert_eq!(c["messages"][0]["role"], "system");
         assert!(c["tools"].as_array().unwrap().len() == 1);
-        assert!(c.get("think").is_none(), "off no manda think");
+        // `Off` se dice **explícitamente**: callar la clave dejaba decidir al
+        // servidor, y `qwen3.5:0.8b` se gastaba los 160 tokens del tope en pensamiento
+        // y devolvía la respuesta vacía (medido el 07-10 en esta máquina).
+        assert_eq!(c["think"], false);
     }
 
     /// El muestreo lo decide el producto, no el crate. Con `None` la clave no
@@ -748,6 +838,203 @@ mod tests {
             OllamaProvider::cuerpo_de(&r)["keep_alive"],
             serde_json::json!(0)
         );
+    }
+
+    /// Lo que se arregló el 07-10: el stream de Ollama **no** espera al final del
+    /// cuerpo. Cada línea cerrada es una letra que ya se puede pintar.
+    #[test]
+    fn cada_linea_se_emite_al_cerrarse_no_al_terminar_el_cuerpo() {
+        let mut t = Transmision::nueva("gemma3:1b".into());
+        t.recibir(
+            "{\"model\":\"gemma3:1b\",\"message\":{\"content\":\"Ho\"},\"done\":false}\n",
+        )
+        .expect("línea válida");
+        assert_eq!(
+            t.pendientes.len(),
+            1,
+            "con una línea ya hay delta que emitir"
+        );
+        assert_eq!(t.pendientes[0], StreamDelta::Texto("Ho".into()));
+
+        t.recibir("{\"model\":\"gemma3:1b\",\"message\":{\"content\":\"la\"},\"done\":false}\n")
+            .expect("línea válida");
+        assert_eq!(t.pendientes.len(), 2);
+        assert_eq!(t.pendientes[1], StreamDelta::Texto("la".into()));
+        // Las cuentas siguen contando las dos.
+        assert_eq!(t.lineas.len(), 2);
+    }
+
+    /// El corte de bytes de la red no coincide con el de las líneas: lo incompleto
+    /// no se emite ni se duplica cuando llega el resto.
+    #[test]
+    fn una_linea_partida_sale_cuando_se_completa() {
+        let mut t = Transmision::nueva("g".into());
+        t.recibir("{\"model\":\"g\",\"message\":{\"cont").expect("aún no es línea");
+        assert!(t.pendientes.is_empty(), "sin \\n no se suelta nada");
+        assert!(t.lineas.is_empty());
+        t.recibir("ent\":\"x\"},\"done\":false}\n").expect("ahora sí");
+        assert_eq!(t.pendientes.len(), 1);
+        assert_eq!(t.pendientes[0], StreamDelta::Texto("x".into()));
+        assert_eq!(t.lineas.len(), 1, "la línea partida no se cuenta dos veces");
+    }
+
+    /// Medido el 07-10 contra el Ollama de esta máquina: `qwen3.5:0.8b` manda el
+    /// razonamiento en `message.thinking` y `reasoning` no aparece. `juntar` ya leía
+    /// las dos claves; el stream leía solo `reasoning`, así que un turno que pensaba
+    /// no emitía **ni un delta** y la pantalla se quedaba vacía hasta el final.
+    #[test]
+    fn el_pensamiento_de_thinking_llega_al_stream() {
+        let mut t = Transmision::nueva("qwen3.5:0.8b".into());
+        t.recibir("{\"model\":\"q\",\"message\":{\"content\":\"\",\"thinking\":\"Pienso\"},\"done\":false}\n")
+            .unwrap();
+        t.recibir("{\"model\":\"q\",\"message\":{\"content\":\"luego \"},\"done\":false}\n")
+            .unwrap();
+        t.recibir("{\"model\":\"q\",\"message\":{\"content\":\"hablo\"},\"done\":true,\"eval_count\":3}")
+            .unwrap();
+        t.rematar().unwrap();
+        let tipos: Vec<&str> = t
+            .pendientes
+            .iter()
+            .map(|d| match d {
+                StreamDelta::Razonamiento(_) => "razón",
+                StreamDelta::Texto(_) => "texto",
+                StreamDelta::Final(_) => "final",
+            })
+            .collect();
+        assert_eq!(tipos, vec!["razón", "texto", "texto", "final"], "{tipos:?}");
+    }
+
+    /// Ollama manda la línea `done: true` **sin** salto de línea final: si ese resto
+    /// se perdiera, las cuentas del turno irían a cero.
+    #[test]
+    fn el_remate_se_come_la_ultima_linea_sin_salto_y_da_las_cuentas() {
+        let mut t = Transmision::nueva("gemma3:1b".into());
+        t.recibir("{\"model\":\"gemma3:1b\",\"message\":{\"content\":\"Hola\"},\"done\":false}\n")
+            .unwrap();
+        t.recibir("{\"model\":\"gemma3:1b\",\"message\":{\"content\":\"\"},\"done\":true,\"prompt_eval_count\":19,\"eval_count\":12}")
+            .unwrap();
+        assert_eq!(t.pendientes.len(), 1, "la segunda línea no tenía letra");
+        t.rematar().expect("hay líneas que rematar");
+        let final_r = match t
+            .pendientes
+            .iter()
+            .find(|d| matches!(d, StreamDelta::Final(_)))
+            .expect("el remate cierra con las cuentas")
+        {
+            StreamDelta::Final(r) => r.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(final_r.texto, "Hola");
+        assert_eq!(final_r.tokens_entrada, Some(19));
+        assert_eq!(final_r.tokens_salida, Some(12));
+    }
+
+    #[test]
+    fn una_respuesta_vacia_sigue_siendo_un_error() {
+        let mut t = Transmision::nueva("g".into());
+        let e = t.rematar().expect_err("cuerpo vacío no es un turno terminado");
+        assert!(matches!(e, ProviderError::RespuestaInvalida(_)));
+    }
+
+    /// El arreglo del 07-10, probado con un servidor que se niega a seguir escribiendo
+    /// hasta que el cliente pida la primera letra: si alguien vuelve a acumular el
+    /// NDJSON entero antes de emitir, esto no pasa — se cuelga y el `timeout` lo
+    /// convierte en un fallo claro. Con el cuerpo ya cerrado del todo, lo que se
+    /// veía en el chat era la respuesta entera de golpe.
+    #[tokio::test]
+    async fn cada_letra_sale_antes_de_que_termine_el_cuerpo() {
+        use futures_util::StreamExt;
+        use std::io::{BufRead, Read, Write};
+
+        let linea = |c: &str| {
+            format!("{{\"model\":\"gemma3:1b\",\"message\":{{\"content\":\"{c}\"}},\"done\":false}}")
+        };
+        let lineas: Vec<String> = vec![
+            linea("Ho"),
+            linea("la"),
+            "{\"model\":\"gemma3:1b\",\"message\":{\"content\":\"!\"},\"done\":true,\"eval_count\":3}"
+                .to_string(),
+        ];
+        let (aviso_tx, aviso_rx) = std::sync::mpsc::channel::<()>();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("puerto libre");
+        let puerto = listener.local_addr().expect("dirección local").port();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("el cliente conecta");
+            let mut cabecera = String::new();
+            {
+                let mut lector = std::io::BufReader::new(&sock);
+                loop {
+                    cabecera.clear();
+                    match lector.read_line(&mut cabecera) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if cabecera.trim().is_empty() => break,
+                        Ok(_) => {}
+                    }
+                }
+            }
+            // HTTP/1.0 sin `Content-Length`: el cuerpo se lee hasta el cierre, que es
+            // justo lo que permite soltar una línea y esperar.
+            let _ = sock.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/x-ndjson\r\n\r\n");
+            let _ = sock.write_all(lineas[0].as_bytes());
+            let _ = sock.write_all(b"\n");
+            let _ = sock.flush();
+            // Y aquí se juega el test: el servidor no escribe el resto hasta que el
+            // consumidor de arriba haya visto la primera línea.
+            if aviso_rx.recv_timeout(Duration::from_secs(10)).is_err() {
+                return;
+            }
+            for l in &lineas[1..] {
+                let _ = sock.write_all(l.as_bytes());
+                let _ = sock.write_all(b"\n");
+                let _ = sock.flush();
+            }
+            let _ = sock.shutdown(std::net::Shutdown::Write);
+            // Drenar lo que quedó de la petición: cerrar con bytes sin leer manda un
+            // RST y el cliente lo lee como stream roto.
+            let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut sobrante = Vec::new();
+            let _ = sock.read_to_end(&mut sobrante);
+        });
+
+        let proveedor = OllamaProvider::con_base(format!("http://127.0.0.1:{puerto}"));
+        let mut stream = tokio::time::timeout(Duration::from_secs(10), proveedor.stream(req()))
+            .await
+            .expect("el servidor contestó")
+            .expect("el stream se abrió");
+
+        let primero = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("el primer delta llegó con el cuerpo aún abierto")
+            .expect("el stream no se cerró antes de tiempo")
+            .expect("sin error de proveedor");
+        assert_eq!(primero, StreamDelta::Texto("Ho".into()));
+        aviso_tx.send(()).expect("aviso al servidor");
+
+        let mut deltas = vec![primero];
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), stream.next()).await {
+                Err(_) => panic!("el stream se quedó colgado después del aviso"),
+                Ok(None) => break,
+                Ok(Some(Ok(d))) => deltas.push(d),
+                Ok(Some(Err(e))) => panic!("error de proveedor: {e}"),
+            }
+        }
+        assert_eq!(deltas.len(), 4, "un delta por línea, más las cuentas finales");
+        let texto: String = deltas
+            .iter()
+            .filter_map(|d| match d {
+                StreamDelta::Texto(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texto, "Hola!", "se perdió letra por el camino");
+        match deltas.last() {
+            Some(StreamDelta::Final(r)) => {
+                assert_eq!(r.tokens_salida, Some(3), "las cuentas salen del cuerpo entero");
+                assert_eq!(r.modelo, "gemma3:1b");
+            }
+            otra => panic!("el stream no cerró con las cuentas: {otra:?}"),
+        }
     }
 
     #[test]
