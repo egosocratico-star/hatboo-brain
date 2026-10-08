@@ -85,10 +85,18 @@ con un directorio sin `brain-rules.json` deja `Reglas` **vacías** — no cae al
 embebido por su cuenta. Un producto empaquetado que no tiene directorio de config
 tiene que pedirlas explícitamente, que es lo que hace Hatboo.
 
-`config/models.example.json` lleva la RAM residente de los siete locales en los tres
-escalones de la escalera (2048 / 4096 / 8192), medida con Ollama 0,35,1 sobre 8,45 GB
-sin GPU. No hay ningún número interpolado. Un `num_ctx` **fuera** de esa escalera sí
-queda sin número: el Governor lo descarta y lo dice, en vez de extrapolar el KV cache.
+`config/models.example.json` lleva la RAM residente de los siete locales en los cinco
+escalones de la escalera (512 / 1024 / 2048 / 4096 / 8192), medida con Ollama 0,35,1
+sobre 8,45 GB sin GPU. No hay ningún número interpolado. Un `num_ctx` **fuera** de esa
+escalera sí queda sin número: el Governor lo descarta y lo dice, en vez de extrapolar
+el KV cache.
+
+Lo que midió la escalera baja (05-10) cambia la expectativa: entre 2048 y 512 hay
+**0–52 MB** en seis de los siete modelos —el peso domina; el KV de la ventana corta
+casi no pesa—. Por eso el Governor no aprieta la ventana *para* caber: la aprieta
+cuando el peldaño de abajo sí cuadra con margen, y cuando la cuenta no sale corre el
+turno con el margen gastado y lo dice (`Ajuste::SinMargen`). Negar un turno por RAM
+dejó de ser una de sus salidas.
 
 ## Medir
 
@@ -116,10 +124,10 @@ Lo que no se pudo comprobar se reporta como `sin_comprobar`, nunca como acierto.
 
 ## Estado
 
-Compila y pasan las pruebas: **352 verdes** con las features por defecto (`ollama`) —
-229 unitarias del lib, 7 del bin `brain-bench`, 115 en los 9 ficheros de integración de
-§10 (context 8 · decision 20 · golden 5 · planner 19 · prompt 9 · recovery 13 ·
-resources 15 · security 10 · verification 16) y 1 doc-test—, y **370 con
+Compila y pasan las pruebas: **377 verdes** con las features por defecto (`ollama`) —
+250 unitarias del lib, 7 del bin `brain-bench`, 119 en los 9 ficheros de integración de
+§10 (context 8 · decision 20 · golden 5 · planner 20 · prompt 11 · recovery 13 ·
+resources 16 · security 10 · verification 16) y 1 doc-test—, y **395 con
 `--all-features`** (las 18 de encima son las rutas de OpenAI, Anthropic y genérico; es
 lo que corre la CI). `clippy --all-targets --all-features -D warnings` a cero y **sin
 un solo `#[allow]`**; la misma tanda corre en GitHub (`windows-latest`, rama `main`).
@@ -162,6 +170,16 @@ cargo test                    # todo
 cargo test --lib              # el crate solo
 cargo run --bin brain-bench -- --ayuda
 ```
+
+## Documentos
+
+| Fichero | Qué es |
+| --- | --- |
+| [`CHANGELOG.md`](CHANGELOG.md) | Lo que cambia visto desde el consumidor, ordenado por `git log`. Sin etiquetas todavía: `0.1.0` en curso |
+| [`docs/decision-log.md`](docs/decision-log.md) | Cada decisión cerrada con su fecha, su razón y a cuál sustituye. La prueba dorada comprueba que la última entrada sobre el `Plan` dice el `SCHEMA_VERSION` del código |
+| [`docs/threat-model.md`](docs/threat-model.md) | Las amenazas con su estado, incluidas las **pendientes** (T7 SSRF por búsqueda web, T9 update, T13 auto-mejora) |
+| [`SECURITY.md`](SECURITY.md) | Cómo reportar |
+| [`benchmarks/`](benchmarks) | La suite de §9, los informes del gate M0 y los volcados crudos de cada corrida |
 
 ## Licencia
 
