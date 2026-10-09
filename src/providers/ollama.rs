@@ -272,6 +272,73 @@ impl OllamaProvider {
     }
 }
 
+/// Las filas de `/api/tags` que merecen un puesto en el registro. Ollama lista el
+/// mismo modelo varias veces: una por cada digest que contesta a ese tag y, además,
+/// una fila `llamacpp:<hash>` que es el alias interno del gguf importado. Medido el
+/// 08-10 en este equipo: **14 filas para 10 modelos** (`qwen3.5:0.8b` sale con dos
+/// digests, 1036 y 1042 MB, y `gemma3:1b` igual, más sus dos alias).
+///
+/// No es cosmética: con las filas sueltas hay un turno del 07-10 firmado con el id
+/// `llamacpp:83be9dbf…` —lo guarda el `decisiones.jsonl` de la app—. Ese nombre no
+/// está en la tabla medida, así que el Governor no tiene cifras de él y la histéresis
+/// del residente no lo reconoce cuando lo que está cargado es `gemma3:1b`. Y cada
+/// fila de más es un `/api/show` que se pide en cada turno.
+fn bases_de_tags(j: &serde_json::Value) -> Vec<(String, Option<u64>, Option<f64>)> {
+    struct Fila {
+        nombre: String,
+        digest: String,
+        disco_mb: Option<u64>,
+        params: Option<f64>,
+    }
+    let mut filas: Vec<Fila> = Vec::new();
+    for m in j.get("models").and_then(|v| v.as_array()).into_iter().flatten() {
+        let Some(nombre) = m.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let disco_mb = m.get("size").and_then(|v| v.as_u64()).map(|b| b / 1_000_000);
+        let params = m
+            .get("details")
+            .and_then(|d| d.get("parameter_size"))
+            .and_then(|v| v.as_str())
+            .and_then(parse_parametros);
+        filas.push(Fila {
+            nombre: nombre.to_string(),
+            digest: m
+                .get("digest")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            disco_mb,
+            params,
+        });
+    }
+    // Los digest que tienen al menos un nombre «de verdad»: si un mismo digest está
+    // también como `llamacpp:<hash>`, el alias sobra.
+    let con_nombre: std::collections::BTreeSet<&str> = filas
+        .iter()
+        .filter(|f| !f.nombre.starts_with("llamacpp:") && !f.digest.is_empty())
+        .map(|f| f.digest.as_str())
+        .collect();
+    let mut vistos = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for f in &filas {
+        if f.nombre.starts_with("llamacpp:")
+            && !f.digest.is_empty()
+            && con_nombre.contains(f.digest.as_str())
+        {
+            continue;
+        }
+        // Dos filas con el mismo tag: se guarda la primera, que es el orden en que
+        // Ollama la devuelve. Elegir entre dos digests de un mismo nombre no le toca
+        // al Brain, sino al servidor que los resuelve.
+        if !vistos.insert(f.nombre.clone()) {
+            continue;
+        }
+        out.push((f.nombre.clone(), f.disco_mb, f.params));
+    }
+    out
+}
+
 /// Ollama manda los argumentos como objeto o como string JSON, según versión.
 fn arguimentos_de(tc: &serde_json::Value) -> serde_json::Value {
     let f = tc.get("function").cloned().unwrap_or_default();
@@ -413,19 +480,7 @@ impl ModelProvider for OllamaProvider {
         // equipo (medido el 06-10: 306 ms en paralelo), y este listado se reconstruye
         // en cada turno del chat: era el coste que él llamaba «el brain continúa
         // después de que cargue el modelo».
-        let mut bases: Vec<(String, Option<u64>, Option<f64>)> = Vec::new();
-        for m in j.get("models").and_then(|v| v.as_array()).into_iter().flatten() {
-            let Some(nombre) = m.get("name").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let disco_mb = m.get("size").and_then(|v| v.as_u64()).map(|b| b / 1_000_000);
-            let params = m
-                .get("details")
-                .and_then(|d| d.get("parameter_size"))
-                .and_then(|v| v.as_str())
-                .and_then(parse_parametros);
-            bases.push((nombre.to_string(), disco_mb, params));
-        }
+        let bases = bases_de_tags(&j);
         let fichas = futures_util::future::join_all(bases.iter().map(|(n, _, _)| self.ficha(n))).await;
         let mut out = Vec::new();
         for ((nombre, disco_mb, params), (capacidades, ctx_max, _modelfile)) in
@@ -902,6 +957,39 @@ mod tests {
             })
             .collect();
         assert_eq!(tipos, vec!["razón", "texto", "texto", "final"], "{tipos:?}");
+    }
+
+    /// Las 14 filas que `/api/tags` devuelve en este equipo por 10 modelos: dos
+    /// digests por tag y el alias `llamacpp:<hash>` de cada gguf importado. Medido el
+    /// 08-10; sin este filtro hay un turno del 07-10 firmado con `llamacpp:83be9dbf…`.
+    #[test]
+    fn el_registro_deja_fuera_alias_y_duplicados_del_tag() {
+        let fila = |nombre: &str, digest: &str, size: u64| {
+            serde_json::json!({
+                "name": nombre, "digest": digest, "size": size,
+                "details": {"parameter_size": "0.8B"}
+            })
+        };
+        let j = serde_json::json!({"models": [
+            fila("qwen3.5:0.8b", "34227f3b", 1_036_000_000),
+            fila("qwen3.5:0.8b", "f1e6f068", 1_042_000_000),
+            fila("llamacpp:f1e6f068", "f1e6f068", 1_042_000_000),
+            fila("gemma3:1b", "766eb44b", 815_000_000),
+            fila("gemma3:1b", "83be9dbf", 815_000_000),
+            fila("llamacpp:83be9dbf", "83be9dbf", 815_000_000),
+            // Un importado sin tag amigo sí se queda: es el único nombre que tiene.
+            fila("llamacpp:aaaa1111", "aaaa1111", 900_000_000),
+            fila("deepseek-r1:1.5b", "e0979632", 1_117_000_000),
+        ]});
+        let bases = bases_de_tags(&j);
+        let nombres: Vec<&str> = bases.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(
+            nombres,
+            vec!["qwen3.5:0.8b", "gemma3:1b", "llamacpp:aaaa1111", "deepseek-r1:1.5b"],
+            "{nombres:?}"
+        );
+        // La que queda es la primera fila del tag, con su tamaño.
+        assert_eq!(bases[0].1, Some(1036));
     }
 
     /// Ollama manda la línea `done: true` **sin** salto de línea final: si ese resto

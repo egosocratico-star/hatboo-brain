@@ -65,6 +65,16 @@ declaración hasta que exista un segundo consumidor.
 
 ### Arreglos que cambian conducta
 
+- **El registro de Ollama se arma con modelos, no con filas de `/api/tags`** (08-10).
+  El servidor repite un nombre por cada digest que contesta a ese tag y añade un alias
+  `llamacpp:<hash>` por cada gguf importado: medido en este equipo, **14 filas para 10
+  modelos**. `bases_de_tags` deja fuera el alias cuando su digest tiene nombre propio, y
+  deja una sola fila por tag (la primera, que es el orden del servidor). No era
+  cosmética: el `decisiones.jsonl` de Hatboo guarda un turno del 07-10 firmado con
+  `llamacpp:83be9dbf…`, un id que no está en la tabla medida —el Governor se queda sin
+  cifras y la histéresis del residente no lo reconoce aunque `gemma3:1b` esté cargado—.
+  Efecto lateral: cada fila que sobra era un `/api/show` en cada turno.
+
 - **Un turno de charla no oye hablar de herramientas** (08-10, entrada 31). Se le
   echó la culpa al modelo de divagar y era el prompt: en un saludo sin herramientas el
   system llevaba una línea negando las aprobaciones, la capa de herramientas decía «Sin
